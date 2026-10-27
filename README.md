@@ -17,7 +17,7 @@ This repository contains multiple interconnected environments (C# & Python) runn
 ### `wsl-cv/` (WSL / Linux - Python)
 **Role:** The core Computer Vision backend. 
 - **Tech Stack:** Python 3.10+, PyTorch, FastAPI, `uv` for dependency management.
-- **Key Flow:** Exposes a `POST /infer` endpoint. Uses `Depth Anything 3` (in `models/depth_anything_3`) to extract depth, uses SAM2 automatic masks for segmentation, then runs layer export and track extraction scripts (`scripts/run_inference_sobal.py`, `scripts/cut_img.py`, `scripts/extract_track.py`) in isolated subprocess sandbox directories (`_jobs/`).
+- **Key Flow:** Exposes a `POST /infer` endpoint. Uses `Depth Anything 3` (in `models/depth_anything_3`) to extract depth, uses SAM 3.1 (Meta Model API) text prompts to find skateable objects, then runs layer export and track extraction scripts (`scripts/run_inference_sobal.py`, `scripts/cut_img.py`, `scripts/extract_track.py`) in isolated subprocess sandbox directories (`_jobs/`).
 - **Important:** Do NOT modify `models/depth_anything_3` as it is vendor code. Look at `wsl-cv/README.md` for specific CV details.
 
 ### `win-server/` (Windows - Python)
@@ -56,7 +56,7 @@ sequenceDiagram
         Win-->>Mobile: {"status":"accepted"}
         Win->>WSL: Internal POST /infer (multipart/form-data: `photo`)
 
-        Note over WSL: 1. DA3 Depth + SAM2 Masks<br/>2. Depth-Sorted Layer Inpainting<br/>3. Track Extraction
+        Note over WSL: 1. DA3 Depth + SAM 3.1 Masks<br/>2. Depth-Sorted Layer Inpainting<br/>3. Track Extraction
 
         WSL-->>Win: JSON (Base64 layers + track metadata)
         Win->>Win: Store latest job state/result

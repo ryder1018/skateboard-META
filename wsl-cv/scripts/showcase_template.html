@@ -1,0 +1,943 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkateP Pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #06080c;
+    --panel: rgba(12, 16, 24, 0.74);
+    --line: rgba(255, 255, 255, 0.08);
+    --text: #e9eef6;
+    --muted: #8a94a6;
+    --lime: #c4ff3a;
+    --orange: #ff8a2a;
+    --cyan: #3fd8ff;
+    --red: #ff4d5e;
+    --sans: "Space Grotesk", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); overflow: hidden; }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; }
+  #labels { position: fixed; inset: 0; pointer-events: none; }
+
+  .ui { position: fixed; z-index: 5; }
+  body.hide-ui .ui:not(.caption):not(.caption-scrim) { display: none; }
+
+  .brand { top: 28px; left: 32px; }
+  .brand h1 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+  .brand h1 span { color: var(--lime); }
+  .brand p { margin: 4px 0 0; color: var(--muted); font-size: 13px; font-family: var(--mono); }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+
+  .pipeline { top: 110px; left: 32px; width: 290px; padding: 10px; }
+  .step { position: relative; display: grid; grid-template-columns: 26px 1fr auto; gap: 10px; align-items: center; padding: 10px 10px; border-radius: 9px; opacity: 0.42; overflow: hidden; }
+  .step.done { opacity: 0.72; }
+  .step.active { opacity: 1; background: rgba(255, 255, 255, 0.045); }
+  .step .num { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); display: grid; place-items: center; font: 600 11px var(--mono); color: var(--muted); }
+  .step.active .num { border-color: var(--lime); color: var(--lime); }
+  .step.done .num { background: rgba(196, 255, 58, 0.12); color: var(--lime); border-color: transparent; }
+  .step .name { font-size: 14px; font-weight: 500; }
+  .step .model { font: 11px var(--mono); color: var(--muted); margin-top: 2px; }
+  .step .time { font: 11px var(--mono); color: var(--muted); }
+  .step .bar { position: absolute; left: 0; bottom: 0; height: 2px; background: var(--lime); width: 0; }
+
+  .detail { top: 110px; right: 32px; width: 360px; padding: 18px 18px 16px; }
+  .detail h2 { margin: 0 0 4px; font-size: 12px; font-family: var(--mono); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .detail .big { font-size: 20px; font-weight: 600; line-height: 1.25; margin: 6px 0 12px; }
+  .card { display: none; }
+  .card.on { display: block; }
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; }
+  .chip { font: 12px var(--mono); padding: 5px 9px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255,255,255,0.03); }
+  .chip.skate { border-color: rgba(196, 255, 58, 0.45); color: var(--lime); background: rgba(196, 255, 58, 0.07); }
+  .sub { font: 11px var(--mono); color: var(--muted); margin: 14px 0 8px; letter-spacing: 0.06em; text-transform: uppercase; }
+  .obj { display: grid; grid-template-columns: 10px 1fr auto; gap: 9px; align-items: center; font: 12px var(--mono); padding: 4px 0; }
+  .obj i { width: 10px; height: 10px; border-radius: 3px; display: block; }
+  .obj b { font-weight: 400; color: var(--muted); }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font: 12px var(--mono); }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  .legend { display: grid; gap: 8px; font-size: 13px; }
+  .legend div { display: flex; gap: 10px; align-items: center; }
+  .legend i { width: 22px; height: 3px; border-radius: 2px; display: block; }
+  .attempt { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; font-size: 12px; }
+  .attempt .head { display: flex; justify-content: space-between; font: 600 12px var(--mono); margin-bottom: 6px; }
+  .attempt.fail .head span:last-child { color: var(--red); }
+  .attempt.pass .head span:last-child { color: var(--lime); }
+  .attempt ul { margin: 0; padding-left: 16px; color: var(--muted); font-family: var(--mono); font-size: 11px; line-height: 1.45; }
+  .attempt li { margin-bottom: 3px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .verified { display: flex; align-items: center; gap: 8px; color: var(--lime); font: 600 13px var(--mono); margin-top: 6px; }
+  .feat { display: flex; gap: 10px; align-items: center; font: 12px var(--mono); padding: 4px 0; }
+  .feat .tag { font-weight: 600; padding: 2px 7px; border-radius: 5px; font-size: 10px; letter-spacing: 0.06em; }
+  .tag.grind { background: rgba(255, 138, 42, 0.16); color: var(--orange); }
+  .tag.jump { background: rgba(63, 216, 255, 0.14); color: var(--cyan); }
+  .tag.behind { background: rgba(122, 162, 255, 0.16); color: #a9c1ff; }
+  .attempt .surf { font: 11px var(--mono); color: var(--text); margin-bottom: 6px; }
+  .notes { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 10px; }
+
+  .scrim { left: 0; right: 0; bottom: 0; height: 300px; z-index: 4; pointer-events: none; background: linear-gradient(to bottom, rgba(6, 8, 12, 0), rgba(6, 8, 12, 0.88) 70%); }
+  .caption { left: 50%; bottom: 92px; transform: translateX(-50%); text-align: center; width: min(1100px, 90vw); pointer-events: none; }
+  .caption .t { font-size: 34px; font-weight: 600; letter-spacing: -0.015em; text-shadow: 0 2px 24px rgba(0,0,0,0.75); }
+  .caption .s { margin-top: 8px; font: 14px var(--mono); color: #b9c2d2; text-shadow: 0 1px 12px rgba(0,0,0,0.9); }
+
+  .controls { left: 50%; bottom: 26px; transform: translateX(-50%); width: min(820px, 80vw); display: flex; gap: 14px; align-items: center; padding: 10px 16px; }
+  .controls button { background: none; border: 1px solid var(--line); color: var(--text); border-radius: 8px; width: 34px; height: 30px; cursor: pointer; font-size: 13px; }
+  .controls input { flex: 1; accent-color: var(--lime); }
+  .controls .clock { font: 12px var(--mono); color: var(--muted); min-width: 92px; text-align: right; }
+  .hint { right: 32px; bottom: 30px; font: 11px var(--mono); color: var(--muted); text-align: right; line-height: 1.6; }
+  body.capture .controls, body.capture .hint { display: none; }
+  body.capture .caption { bottom: 48px; }
+
+  .lbl { font: 600 11px var(--mono); padding: 4px 8px; border-radius: 6px; background: rgba(6, 8, 12, 0.78); border: 1px solid rgba(255,255,255,0.14); white-space: nowrap; color: var(--text); }
+  .lbl em { font-style: normal; color: var(--muted); font-weight: 400; margin-left: 6px; }
+  .lbl.layer { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .lbl.feature-grind { border-color: rgba(255, 138, 42, 0.7); color: var(--orange); }
+  .lbl.feature-jump { border-color: rgba(63, 216, 255, 0.7); color: var(--cyan); }
+  .lbl.occluder { border-color: rgba(122, 162, 255, 0.7); color: #a9c1ff; }
+
+  #error { position: fixed; inset: auto 20px 20px 20px; z-index: 20; display: none; background: #2a0b10; border: 1px solid var(--red); color: #ffd7dc; font: 12px var(--mono); padding: 12px; border-radius: 8px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="labels"></div>
+
+<div class="ui brand">
+  <h1>Skate<span>P</span></h1>
+  <p>one photo → playable 2.5D skate level</p>
+</div>
+
+<div class="ui panel pipeline" id="pipeline"></div>
+
+<div class="ui panel detail" id="detail">
+  <div class="card" data-card="photo">
+    <h2>Input</h2>
+    <div class="big">A single photo</div>
+    <div class="kv" id="photoKv"></div>
+  </div>
+  <div class="card" data-card="depth">
+    <h2>Depth Anything 3</h2>
+    <div class="big">Per-pixel depth, lifted into a relief</div>
+    <div class="kv" id="depthKv"></div>
+  </div>
+  <div class="card" data-card="concepts">
+    <h2>Muse Spark · scene reading</h2>
+    <div class="big">What in this photo can be skated?</div>
+    <div class="sub">skateable</div>
+    <div class="chips" id="chipsSkate"></div>
+    <div class="sub">scenery (for layering)</div>
+    <div class="chips" id="chipsScenery"></div>
+  </div>
+  <div class="card" data-card="sam">
+    <h2>SAM 3.1 · text-prompted segmentation</h2>
+    <div class="big" id="samBig"></div>
+    <div id="objList"></div>
+  </div>
+  <div class="card" data-card="layers">
+    <h2>2.5D layers</h2>
+    <div class="big">Regions sorted by DA3 depth</div>
+    <div class="legend">
+      <div><i style="background:#ffd36a"></i>Foreground · in front of the skater</div>
+      <div><i style="background:var(--lime)"></i>Gameplay · the riding plane</div>
+      <div><i style="background:#7aa2ff"></i>Background · holes inpainted</div>
+    </div>
+  </div>
+  <div class="card" data-card="design">
+    <h2>Muse Spark · choose → verify → repair</h2>
+    <div class="big">Which object is the ground? The track follows its real top edge.</div>
+    <div class="sub">riding surface</div>
+    <div class="chips" id="surfaceChips"></div>
+    <div class="sub">attempts · checked against SAM 3.1 masks</div>
+    <div id="attempts"></div>
+  </div>
+  <div class="card" data-card="ride">
+    <h2>Mission</h2>
+    <div class="big" id="mission"></div>
+    <div class="sub">skater passes behind</div>
+    <div id="features"></div>
+    <div class="notes" id="notes"></div>
+  </div>
+</div>
+
+<div class="ui scrim caption-scrim"></div>
+<div class="ui caption"><div class="t" id="capT"></div><div class="s" id="capS"></div></div>
+
+<div class="ui panel controls">
+  <button id="play" title="Play / pause (space)">❚❚</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0">
+  <div class="clock" id="clock">0.0 / 0.0s</div>
+</div>
+<div class="ui hint">space play · R restart · 1–7 jump to step<br>drag to orbit · C cinematic camera · H hide UI</div>
+<div id="error"></div>
+
+<script id="data" type="application/json">__SHOWCASE_DATA__</script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script>
+  window.addEventListener("error", (e) => {
+    const el = document.getElementById("error");
+    el.style.display = "block";
+    el.textContent += (e.message || e.error) + "\n";
+  });
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
+
+const DATA = JSON.parse(document.getElementById("data").textContent);
+const params = new URLSearchParams(location.search);
+const CAPTURE = params.has("capture");
+if (CAPTURE) document.body.classList.add("capture");
+if (params.get("ui") === "0") document.body.classList.add("hide-ui");
+
+// ---------------------------------------------------------------- helpers
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = (t) => { t = clamp(t); return t * t * (3 - 2 * t); };
+const ramp = (t, t0, t1) => smooth((t - t0) / (t1 - t0));
+const fract = (x) => x - Math.floor(x);
+const hash = (i) => fract(Math.sin(i * 127.1 + 311.7) * 43758.5453);
+const hdr = (hex, k) => new THREE.Color(hex).multiplyScalar(k);
+
+// ---------------------------------------------------------------- world
+const H = 6;
+const W = H * DATA.aspect;
+const toWorld = (u, v, z = 0) => new THREE.Vector3((u - 0.5) * W, (0.5 - v) * H, z);
+
+const level = DATA.level;
+const path = level.path;                                  // [[u,v], ...] normalized, left to right
+const features = level.features || [];
+const jumps = features.filter((f) => f.type === "jump").map((f) => [Math.min(f.from[0], f.to[0]), Math.max(f.from[0], f.to[0])]);
+const grinds = features.filter((f) => f.type === "grind").map((f) => [Math.min(f.from[0], f.to[0]), Math.max(f.from[0], f.to[0])]);
+
+function interpPath(p, u) {
+  if (u <= p[0][0]) return p[0][1];
+  for (let i = 1; i < p.length; i++) {
+    if (u <= p[i][0]) {
+      const t = (u - p[i - 1][0]) / Math.max(p[i][0] - p[i - 1][0], 1e-6);
+      return lerp(p[i - 1][1], p[i][1], t);
+    }
+  }
+  return p[p.length - 1][1];
+}
+
+// The line the board actually travels: the designed path with a parabolic
+// arc over every jump span. Returned in world units (y up).
+function rideHeight(u) {
+  let lift = 0;
+  for (const [a, b] of jumps) {
+    if (u > a && u < b) {
+      const s = (u - a) / (b - a);
+      const h = clamp(0.35 * (b - a) * W, 0.28, 1.1);
+      lift = Math.max(lift, 4 * s * (1 - s) * h);
+    }
+  }
+  return lift;
+}
+function ridePoint(p, u, z, withJumps = true) {
+  const v = toWorld(u, interpPath(p, u), z);
+  if (withJumps) v.y += rideHeight(u);
+  return v;
+}
+
+class SampledCurve extends THREE.Curve {
+  constructor(fn, u0, u1) { super(); this.fn = fn; this.u0 = u0; this.u1 = u1; }
+  getPoint(t, target = new THREE.Vector3()) { return target.copy(this.fn(lerp(this.u0, this.u1, t))); }
+}
+
+// ---------------------------------------------------------------- renderer
+const container = document.getElementById("stage");
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: CAPTURE });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+container.appendChild(renderer.domElement);
+
+const labelRenderer = new CSS2DRenderer({ element: document.getElementById("labels") });
+labelRenderer.setSize(window.innerWidth, window.innerHeight);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x06080c);
+scene.fog = new THREE.Fog(0x06080c, 30, 70);
+
+const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.05, 300);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+let manualCamera = false;
+controls.addEventListener("start", () => { manualCamera = true; });
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.55, 0.4, 0.96);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const key = new THREE.DirectionalLight(0xffffff, 1.6);
+key.position.set(4, 8, 10);
+scene.add(key);
+
+const grid = new THREE.GridHelper(80, 80, 0x1a2230, 0x10151e);
+grid.position.y = -H / 2 - 0.6;
+scene.add(grid);
+
+function fitDistance() {
+  const half = THREE.MathUtils.degToRad(camera.fov / 2);
+  const byH = (H / 2) / Math.tan(half);
+  // Side panels cover ~40% of the width, so fit into the middle 60%.
+  const byW = (W / 2) / (Math.tan(half) * camera.aspect * 0.6);
+  return Math.max(byH, byW) * 1.25;
+}
+
+// ---------------------------------------------------------------- textures
+const loader = new THREE.TextureLoader();
+const loadTex = (url, srgb = true) => new Promise((resolve, reject) => {
+  if (!url) return resolve(null);
+  loader.load(url, (t) => { if (srgb) t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; resolve(t); }, undefined, reject);
+});
+
+function glowTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.35, "rgba(255,255,255,0.45)");
+  grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+
+// ---------------------------------------------------------------- timeline
+const designAttempts = DATA.attempts.length ? DATA.attempts : [{ attempt: 1, errors: [], mission: level.mission }];
+const failedCount = Math.max(0, designAttempts.length - 1);
+const ATTEMPT_SLOT = 2.6;
+const designLength = 1.2 + failedCount * ATTEMPT_SLOT + 4.6;
+
+const STAGES = [];
+{
+  const spec = [
+    ["photo", "Photo", "input", 3.5],
+    ["depth", "Depth", "Depth Anything 3 · local GPU", 6.5],
+    ["concepts", "Concepts", "Muse Spark 1.3", 5.5],
+    ["sam", "Segmentation", "SAM 3.1 · Meta Model API", 6.5],
+    ["layers", "2.5D layers", "depth sort + inpaint", 6.5],
+    ["design", "Track", "Muse Spark 1.3 · verify loop", designLength],
+    ["ride", "Ride", "playable level", 13],
+  ];
+  let t = 0;
+  for (const [key, name, model, len] of spec) { STAGES.push({ key, name, model, t0: t, t1: t + len }); t += len; }
+}
+const STAGE = Object.fromEntries(STAGES.map((s) => [s.key, s]));
+const DURATION = STAGES[STAGES.length - 1].t1 + 0.5;
+const stageAt = (t) => STAGES.find((s) => t < s.t1) || STAGES[STAGES.length - 1];
+
+// ---------------------------------------------------------------- objects
+let relief, layerMeshes = {}, layerFrames = {}, layerLabels = {};
+let pathTube, overlayTubes = [], attemptTubes = [], markers = [], featureLabels = [], samLabels = [];
+let board, boardInner, trail = [], sparks = [];
+let surfacePlane = null, occluderLabels = [], trackGroup, trackFrame, trackLabel;
+const occluders = level.occluders || [];
+const pathU0 = path.length ? path[0][0] : 0;
+const pathU1 = path.length ? path[path.length - 1][0] : 1;
+const R = H * 0.0036;
+
+function tube(fn, u0, u1, color, radius, segments) {
+  const geo = new THREE.TubeGeometry(new SampledCurve(fn, u0, u1), segments, radius, 10, false);
+  const mat = new THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.userData.segments = segments;
+  mesh.renderOrder = 3;
+  return mesh;
+}
+function setDraw(mesh, frac) {
+  const segs = Math.floor(clamp(frac) * mesh.userData.segments);
+  mesh.geometry.setDrawRange(0, segs * 10 * 6);
+  mesh.visible = segs > 0;
+}
+
+function label(text, cls, extra) {
+  const el = document.createElement("div");
+  el.className = "lbl " + (cls || "");
+  el.innerHTML = text + (extra ? `<em>${extra}</em>` : "");
+  const obj = new CSS2DObject(el);
+  obj.userData.el = el;
+  return obj;
+}
+function setLabel(obj, opacity) {
+  obj.visible = opacity > 0.01;
+  obj.userData.el.style.opacity = opacity.toFixed(3);
+}
+
+async function build() {
+  const [photo, depth, disp, sam, fg, gp, bg, surf] = await Promise.all([
+    loadTex(DATA.images.photo), loadTex(DATA.images.depth), loadTex(DATA.images.disp, false), loadTex(DATA.images.sam),
+    loadTex(DATA.images.foreground), loadTex(DATA.images.gameplay), loadTex(DATA.images.background),
+    loadTex(DATA.images.surface),
+  ]);
+
+  // Relief: one plane displaced by DA3 depth, cross-fading photo / depth / SAM.
+  const segX = 320, segY = Math.max(32, Math.round(320 / DATA.aspect));
+  relief = new THREE.Mesh(
+    new THREE.PlaneGeometry(W, H, segX, segY),
+    new THREE.ShaderMaterial({
+      transparent: true,
+      uniforms: {
+        tPhoto: { value: photo }, tDepth: { value: depth }, tSam: { value: sam }, tDisp: { value: disp },
+        uDisp: { value: 0 }, uDepthMix: { value: 0 }, uSamMix: { value: 0 }, uOpacity: { value: 1 },
+      },
+      vertexShader: `
+        uniform sampler2D tDisp; uniform float uDisp; varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          vec3 p = position;
+          p.z += texture2D(tDisp, uv).r * uDisp;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+        }`,
+      fragmentShader: `
+        uniform sampler2D tPhoto, tDepth, tSam; uniform float uDepthMix, uSamMix, uOpacity; varying vec2 vUv;
+        void main() {
+          vec3 c = texture2D(tPhoto, vUv).rgb;
+          c = mix(c, texture2D(tDepth, vUv).rgb, uDepthMix);
+          c = mix(c, texture2D(tSam, vUv).rgb, uSamMix);
+          gl_FragColor = vec4(c * 0.9, uOpacity);
+          #include <colorspace_fragment>
+        }`,
+    })
+  );
+  scene.add(relief);
+
+  // SAM 3.1 object labels, anchored on the relief surface.
+  for (const o of DATA.objects) {
+    const l = label(`<span style="color:${o.color}">●</span> ${o.id}`, "", o.score != null ? o.score.toFixed(2) : "");
+    l.userData.uv = o.at;
+    scene.add(l);
+    samLabels.push(l);
+  }
+
+  // The three depth-sorted layers.
+  const layerSpec = [
+    ["background", bg, 1, 0x7aa2ff, "Background"],
+    ["gameplay", gp, 2, 0xc4ff3a, "Gameplay"],
+    ["foreground", fg, 4, 0xffd36a, "Foreground"],
+  ];
+  for (const [name, tex, order, color, title] of layerSpec) {
+    if (!tex) continue;
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(W, H),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, color: new THREE.Color(0.9, 0.9, 0.9) })
+    );
+    mesh.renderOrder = order;
+    scene.add(mesh);
+    layerMeshes[name] = mesh;
+
+    const frame = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.PlaneGeometry(W, H)),
+      new THREE.LineBasicMaterial({ color: hdr(color, 1.4), transparent: true })
+    );
+    frame.renderOrder = order;
+    scene.add(frame);
+    layerFrames[name] = frame;
+
+    const l = label(title, "layer");
+    l.userData.el.style.color = "#" + new THREE.Color(color).getHexString();
+    l.position.set(-W / 2 + 0.05, H / 2 + 0.28, 0);
+    l.center.set(0, 0.5);
+    mesh.add(l);
+    layerLabels[name] = l;
+  }
+
+  // The track is its own layer, as in the original design and in Unity: it
+  // sits between the gameplay and foreground layers, so the foreground
+  // layer hides the skater. Everything track-related lives in this group.
+  trackGroup = new THREE.Group();
+  scene.add(trackGroup);
+  if (surf) {
+    surfacePlane = new THREE.Mesh(new THREE.PlaneGeometry(W, H), new THREE.MeshBasicMaterial({ map: surf, transparent: true, depthWrite: false }));
+    surfacePlane.renderOrder = 2.5;
+    surfacePlane.visible = false;
+    trackGroup.add(surfacePlane);
+  }
+  trackFrame = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.PlaneGeometry(W, H)),
+    new THREE.LineBasicMaterial({ color: hdr(0xc4ff3a, 1.4), transparent: true })
+  );
+  trackFrame.renderOrder = 2.5;
+  trackGroup.add(trackFrame);
+  trackLabel = label("Track · layer_00", "layer");
+  trackLabel.userData.el.style.color = "#c4ff3a";
+  trackLabel.position.set(-W / 2 + 0.05, H / 2 + 0.28, 0);
+  trackLabel.center.set(0, 0.5);
+  trackGroup.add(trackLabel);
+  for (const o of occluders) {
+    const anchor = DATA.objects.find((a) => a.id === o.id);
+    if (!anchor) continue;
+    const l = label(`behind · ${o.id}`, "occluder");
+    l.position.copy(toWorld(anchor.at[0], anchor.at[1], 0.3));
+    l.userData.range = o.x_range;
+    scene.add(l);
+    occluderLabels.push(l);
+  }
+
+  // Muse Spark's rejected attempts, drawn in red during the repair loop.
+  for (const a of designAttempts.slice(0, failedCount)) {
+    if (!a.path || a.path.length < 2) { attemptTubes.push(null); continue; }
+    const p = a.path;
+    const m = tube((u) => toWorld(u, interpPath(p, u), 0.05), p[0][0], p[p.length - 1][0], hdr(0xff4d5e, 1.6), R * 0.8, 300);
+    trackGroup.add(m);
+    attemptTubes.push(m);
+  }
+
+  // Final path, then grind and jump overlays on top of it.
+  if (path.length >= 2) {
+    pathTube = tube((u) => ridePoint(path, u, 0.05), pathU0, pathU1, hdr(0xc4ff3a, 2.2), R, 600);
+    trackGroup.add(pathTube);
+    for (const f of features) {
+      const a = Math.min(f.from[0], f.to[0]), b = Math.max(f.from[0], f.to[0]);
+      if (b - a < 1e-3) continue;
+      const isGrind = f.type === "grind";
+      const m = tube((u) => ridePoint(path, u, 0.06), a, b, isGrind ? hdr(0xff8a2a, 3.2) : hdr(0x3fd8ff, 3.0), isGrind ? R * 2.2 : R * 1.5, 160);
+      m.userData.span = [a, b];
+      trackGroup.add(m);
+      overlayTubes.push(m);
+
+      const mid = (a + b) / 2;
+      const l = label(`${f.type.toUpperCase()} · ${f.object}`, "feature-" + f.type);
+      l.position.copy(ridePoint(path, mid, 0.1)).add(new THREE.Vector3(0, 0.35, 0));
+      l.userData.u = mid;
+      trackGroup.add(l);
+      featureLabels.push(l);
+    }
+    const dot = new THREE.SphereGeometry(R * 2.2, 16, 12);
+    for (const [u, v] of path) {
+      const m = new THREE.Mesh(dot, new THREE.MeshBasicMaterial({ color: hdr(0xffffff, 1.5), transparent: true }));
+      m.position.copy(toWorld(u, v, 0.05));
+      m.userData.u = u;
+      m.renderOrder = 3.1;
+      trackGroup.add(m);
+      markers.push(m);
+    }
+  }
+
+  buildBoard();
+}
+
+function buildBoard() {
+  const L = H * 0.12;
+  board = new THREE.Group();
+  boardInner = new THREE.Group();
+  board.add(boardInner);
+
+  const deck = new THREE.Mesh(
+    new THREE.BoxGeometry(L, L * 0.05, L * 0.27),
+    new THREE.MeshStandardMaterial({ color: 0x2a2f38, roughness: 0.5, metalness: 0.1, emissive: hdr(0xc4ff3a, 0.75) })
+  );
+  deck.position.y = L * 0.11;
+  boardInner.add(deck);
+  for (const sx of [-1, 1]) {
+    const nose = new THREE.Mesh(
+      new THREE.BoxGeometry(L * 0.14, L * 0.05, L * 0.27),
+      deck.material
+    );
+    nose.position.set(sx * L * 0.55, L * 0.15, 0);
+    nose.rotation.z = sx * 0.35;
+    boardInner.add(nose);
+  }
+  const wheelGeo = new THREE.CylinderGeometry(L * 0.055, L * 0.055, L * 0.05, 18);
+  const wheelMat = new THREE.MeshStandardMaterial({ color: 0xf2f2f2, emissive: hdr(0xc4ff3a, 0.35), roughness: 0.4 });
+  for (const sx of [-0.33, 0.33]) for (const sz of [-0.11, 0.11]) {
+    const w = new THREE.Mesh(wheelGeo, wheelMat);
+    w.rotation.x = Math.PI / 2;
+    w.position.set(sx * L, L * 0.055, sz * L);
+    boardInner.add(w);
+  }
+  const glow = glowTexture();
+  const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, color: hdr(0xc4ff3a, 1.0), transparent: true, opacity: 0.38, blending: THREE.AdditiveBlending, depthWrite: false }));
+  halo.position.y = L * 0.1;
+  halo.scale.setScalar(L * 1.8);
+  board.add(halo);
+
+  // Drawn with the track: after the gameplay layer, before the foreground.
+  board.traverse((o) => {
+    if (o.isMesh || o.isSprite) { o.material.transparent = true; o.renderOrder = 3.2; }
+  });
+  board.userData.L = L;
+  scene.add(board);
+
+  for (let i = 0; i < 26; i++) {
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, color: hdr(0xc4ff3a, 2), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+    s.renderOrder = 3.3;
+    scene.add(s);
+    trail.push(s);
+  }
+  for (let i = 0; i < 18; i++) {
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, color: hdr(0xff9a3a, 3), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+    s.renderOrder = 3.3;
+    scene.add(s);
+    sparks.push(s);
+  }
+}
+
+// ---------------------------------------------------------------- UI
+const fmtS = (x) => (x == null ? "" : `${Number(x).toFixed(1)}s`);
+function buildUI() {
+  const timeFor = { depth: DATA.timings.da3, concepts: DATA.timings.concepts, sam: DATA.timings.sam31,
+    design: DATA.attempts.reduce((s, a) => s + (a.seconds || 0), 0) || null };
+  document.getElementById("pipeline").innerHTML = STAGES.map((s, i) => `
+    <div class="step" data-step="${s.key}">
+      <div class="num">${i + 1}</div>
+      <div><div class="name">${s.name}</div><div class="model">${s.model}</div></div>
+      <div class="time">${fmtS(timeFor[s.key])}</div>
+      <div class="bar"></div>
+    </div>`).join("");
+
+  document.getElementById("photoKv").innerHTML = `<span>file</span><span>${DATA.title}</span><span>aspect</span><span>${DATA.aspect.toFixed(2)}</span>`;
+  document.getElementById("depthKv").innerHTML = `<span>model</span><span>Depth Anything 3 (small)</span><span>runs</span><span>local GPU</span><span>time</span><span>${fmtS(DATA.timings.da3) || "–"}</span>`;
+
+  const chip = (t, cls) => `<span class="chip ${cls}">${t}</span>`;
+  document.getElementById("chipsSkate").innerHTML = DATA.concepts.skateable.map((c) => chip(c, "skate")).join("");
+  document.getElementById("chipsScenery").innerHTML = DATA.concepts.scenery.map((c) => chip(c, "")).join("");
+
+  const skateN = DATA.objects.filter((o) => o.skateable).length;
+  document.getElementById("samBig").textContent = `${DATA.objects.length} objects · ${skateN} skateable`;
+  document.getElementById("objList").innerHTML = DATA.objects.slice(0, 10).map((o) =>
+    `<div class="obj"><i style="background:${o.color}"></i><span>${o.id}${o.skateable ? "" : ' <b>scenery</b>'}</span><b>${o.score != null ? o.score.toFixed(2) : ""}</b></div>`).join("");
+
+  document.getElementById("surfaceChips").innerHTML = (level.surfaces.length ? level.surfaces : ["geometric fallback"]).map((c) => chip(c, "skate")).join("");
+  document.getElementById("attempts").innerHTML = designAttempts.map((a, i) => {
+    const pass = a.errors.length === 0;
+    const items = a.errors.slice(0, 3).map((e) => `<li>${e.replace(/</g, "&lt;")}</li>`).join("");
+    return `<div class="attempt ${pass ? "pass" : "fail"}" data-attempt="${i}">
+      <div class="head"><span>Attempt ${a.attempt}${a.seconds ? ` · ${fmtS(a.seconds)}` : ""}</span><span>${pass ? "0 violations" : `${a.errors.length} violation${a.errors.length > 1 ? "s" : ""}`}</span></div>
+      ${a.surfaces ? `<div class="surf">surface: ${a.surfaces.join(", ") || "–"}</div>` : ""}
+      ${items ? `<ul>${items}</ul>` : ""}
+      ${pass ? '<div class="verified">✓ verified against SAM 3.1 masks</div>' : ""}
+    </div>`;
+  }).join("");
+
+  document.getElementById("mission").textContent = level.mission;
+  document.getElementById("features").innerHTML = occluders.length
+    ? occluders.map((o) => `<div class="feat"><span class="tag behind">BEHIND</span><span>${o.id}</span></div>`).join("")
+    : '<div class="feat"><span>nothing in front of the track</span></div>';
+  document.getElementById("notes").textContent = level.design_notes || "";
+}
+
+function captionFor(stage, t) {
+  const nObj = DATA.objects.length;
+  const nCon = DATA.concepts.skateable.length + DATA.concepts.scenery.length;
+  switch (stage.key) {
+    case "photo": return ["One photo in.", "any street, desk or park becomes a skate level"];
+    case "depth": return ["Depth Anything 3 lifts it into 3D", "per-pixel depth · runs on the local GPU"];
+    case "concepts": return ["Muse Spark reads the scene", `${nCon} things to look for, chosen for this photo`];
+    case "sam": return ["SAM 3.1 finds every one of them", `${nObj} objects segmented from text prompts`];
+    case "layers": return ["Depth-sorted into 2.5D layers", "foreground · gameplay · background"];
+    case "design": {
+      const v = designAttempts.map((a) => (a.errors.length ? `attempt ${a.attempt}: ${a.errors.length} violation${a.errors.length > 1 ? "s" : ""}` : `attempt ${a.attempt}: verified`)).join("  →  ");
+      return ["Muse Spark picks the ground. The track follows its real edge.", v];
+    }
+    default: return [level.mission, occluders.length
+      ? `rides behind ${occluders.map((o) => o.label).join(", ")} · ${level.generator}`
+      : `rides along the ground · ${level.generator}`];
+  }
+}
+
+let lastCaption = "";
+function updateUI(t) {
+  const stage = stageAt(t);
+  for (const el of document.querySelectorAll(".step")) {
+    const s = STAGE[el.dataset.step];
+    el.classList.toggle("active", s === stage);
+    el.classList.toggle("done", t >= s.t1);
+    el.querySelector(".bar").style.width = `${(s === stage ? clamp((t - s.t0) / (s.t1 - s.t0)) : 0) * 100}%`;
+  }
+  for (const el of document.querySelectorAll(".card")) el.classList.toggle("on", el.dataset.card === stage.key);
+
+  // Staggered reveals are driven by time, not CSS transitions, so captured frames are exact.
+  const c = STAGE.concepts;
+  document.querySelectorAll("#chipsSkate .chip, #chipsScenery .chip").forEach((el, i) => {
+    el.style.opacity = ramp(t, c.t0 + 0.6 + i * 0.28, c.t0 + 0.9 + i * 0.28).toFixed(3);
+  });
+  const s = STAGE.sam;
+  document.querySelectorAll("#objList .obj").forEach((el, i) => {
+    el.style.opacity = ramp(t, s.t0 + 1.0 + i * 0.15, s.t0 + 1.3 + i * 0.15).toFixed(3);
+  });
+  const d = STAGE.design;
+  document.querySelectorAll("#attempts .attempt").forEach((el, i) => {
+    el.style.opacity = ramp(t, d.t0 + 1.2 + i * ATTEMPT_SLOT, d.t0 + 1.5 + i * ATTEMPT_SLOT).toFixed(3);
+  });
+
+  const [ct, cs] = captionFor(stage, t);
+  const key = ct + cs;
+  if (key !== lastCaption) {
+    document.getElementById("capT").textContent = ct;
+    document.getElementById("capS").textContent = cs;
+    lastCaption = key;
+  }
+  const fade = Math.min(ramp(t, stage.t0, stage.t0 + 0.6), 1 - ramp(t, stage.t1 - 0.4, stage.t1));
+  document.querySelector(".caption").style.opacity = (stage.key === "ride" ? ramp(t, stage.t0, stage.t0 + 0.6) : fade).toFixed(3);
+
+  document.getElementById("clock").textContent = `${t.toFixed(1)} / ${DURATION.toFixed(1)}s`;
+  if (!scrubbing) document.getElementById("scrub").value = String(Math.round((t / DURATION) * 1000));
+}
+
+// ---------------------------------------------------------------- scene state
+const camKeys = () => {
+  const d = fitDistance();
+  return {
+    front: [new THREE.Vector3(0, 0, d), new THREE.Vector3(0, 0, 0)],
+    relief: [new THREE.Vector3(d * 0.5, d * 0.2, d * 0.95), new THREE.Vector3(0, -H * 0.04, 0.6)],
+    concepts: [new THREE.Vector3(-d * 0.42, d * 0.12, d * 0.88), new THREE.Vector3(0, 0, 0.4)],
+    sam: [new THREE.Vector3(d * 0.22, d * 0.06, d * 0.97), new THREE.Vector3(0, 0, 0.3)],
+    layers: [new THREE.Vector3(d * 0.8, d * 0.3, d * 0.82), new THREE.Vector3(0, 0, -0.4)],
+    // Aim below center so paths near the bottom of the photo clear the caption.
+    design: [new THREE.Vector3(d * 0.5, d * 0.06, d * 0.88), new THREE.Vector3(0, -H * 0.1, 0)],
+    overview: [new THREE.Vector3(0, -H * 0.04, d), new THREE.Vector3(0, -H * 0.08, 0)],
+  };
+};
+const camPos = new THREE.Vector3(), camTarget = new THREE.Vector3();
+function blendCam(from, to, k) {
+  camPos.lerpVectors(from[0], to[0], k);
+  camTarget.lerpVectors(from[1], to[1], k);
+}
+
+function rideU(t) {
+  const r = STAGE.ride;
+  return lerp(pathU0, pathU1, clamp((t - (r.t0 + 1.4)) / 8.6));
+}
+
+function applyState(t) {
+  const K = camKeys();
+  const S = STAGE;
+  const explode = ramp(t, S.layers.t0 + 1.2, S.layers.t0 + 4.2) * (1 - 0.72 * ramp(t, S.ride.t0, S.ride.t0 + 2.2));
+
+  // Relief: depth rises in step 2, stays through segmentation, sinks when layers split.
+  const u = relief.material.uniforms;
+  const dispMax = H * 0.3;
+  u.uDisp.value = dispMax * ramp(t, S.depth.t0 + 0.8, S.depth.t0 + 3.6) * (1 - ramp(t, S.layers.t0, S.layers.t0 + 1.6));
+  u.uDepthMix.value = ramp(t, S.depth.t0 + 0.3, S.depth.t0 + 1.6) * (1 - ramp(t, S.concepts.t0, S.concepts.t0 + 1.2));
+  u.uSamMix.value = ramp(t, S.sam.t0 + 0.3, S.sam.t0 + 1.5) * (1 - ramp(t, S.layers.t0, S.layers.t0 + 1.2));
+  u.uOpacity.value = 1 - ramp(t, S.layers.t0 + 1.2, S.layers.t0 + 2.4);
+  relief.visible = u.uOpacity.value > 0.001;
+
+  // SAM labels sit on the displaced surface.
+  samLabels.forEach((l, i) => {
+    const [lu, lv] = l.userData.uv;
+    l.position.copy(toWorld(lu, lv, 0.15 + u.uDisp.value * 0.85));
+    setLabel(l, ramp(t, S.sam.t0 + 1.0 + i * 0.1, S.sam.t0 + 1.3 + i * 0.1) * (1 - ramp(t, S.layers.t0, S.layers.t0 + 0.8)));
+  });
+
+  // Layers: fade in, explode along z, then compress to play depth for the ride.
+  const zOf = { background: -2.6 * explode, gameplay: 0, foreground: 1.9 * explode };
+  const layerIn = ramp(t, S.layers.t0 + 1.0, S.layers.t0 + 2.2);
+  // Like Unity's ForegroundOcclusionFader: while the skater is behind a
+  // foreground object, the foreground fades to 35% so the player stays readable.
+  const rideBoardU = rideU(t);
+  let behind = 0;
+  if (t >= S.ride.t0 + 1.4) {
+    for (const o of occluders) {
+      const [x0, x1] = o.x_range;
+      const edge = Math.max(0.01, (x1 - x0) * 0.25);
+      behind = Math.max(behind, Math.min(ramp(rideBoardU, x0 - edge, x0 + edge), 1 - ramp(rideBoardU, x1 - edge, x1 + edge)));
+    }
+  }
+  for (const [name, mesh] of Object.entries(layerMeshes)) {
+    mesh.position.z = zOf[name] * (H / 6);
+    mesh.material.opacity = layerIn * (name === "foreground" ? 1 - 0.65 * behind : 1);
+    mesh.visible = layerIn > 0.001;
+    const frame = layerFrames[name];
+    frame.position.z = mesh.position.z;
+    const frameOn = layerIn * (1 - ramp(t, S.ride.t0, S.ride.t0 + 1.5)) * 0.85;
+    frame.material.opacity = frameOn;
+    frame.visible = frameOn > 0.01;
+    setLabel(layerLabels[name], ramp(t, S.layers.t0 + 2.4, S.layers.t0 + 3.2) * (1 - ramp(t, S.ride.t0, S.ride.t0 + 0.8)));
+  }
+
+  // Design loop: each rejected attempt draws in red, then fades; the verified path draws last.
+  const d0 = S.design.t0 + 1.2;
+  attemptTubes.forEach((m, i) => {
+    if (!m) return;
+    const a0 = d0 + i * ATTEMPT_SLOT;
+    setDraw(m, ramp(t, a0 + 0.2, a0 + 1.2));
+    m.material.opacity = 1 - ramp(t, a0 + ATTEMPT_SLOT - 0.5, a0 + ATTEMPT_SLOT - 0.1);
+    if (m.material.opacity < 0.01) m.visible = false;
+  });
+  const final0 = d0 + failedCount * ATTEMPT_SLOT;
+  // Track layer: halfway between gameplay and foreground, never on either.
+  const zTrack = Math.max(0.08, 0.5 * zOf.foreground * (H / 6));
+  trackGroup.position.z = zTrack;
+  const trackFrameOn = ramp(t, S.design.t0 + 0.3, S.design.t0 + 1.0) * (1 - ramp(t, S.ride.t0, S.ride.t0 + 1.5)) * 0.85;
+  trackFrame.material.opacity = trackFrameOn;
+  trackFrame.visible = trackFrameOn > 0.01;
+  setLabel(trackLabel, ramp(t, S.design.t0 + 0.5, S.design.t0 + 1.2) * (1 - ramp(t, S.ride.t0, S.ride.t0 + 0.8)));
+  if (surfacePlane) {
+    surfacePlane.material.opacity = ramp(t, final0 - 0.8, final0 + 0.2) * (1 - ramp(t, S.ride.t0, S.ride.t0 + 1.5));
+    surfacePlane.visible = surfacePlane.material.opacity > 0.01;
+  }
+  const boardU = rideU(t);
+  for (const l of occluderLabels) {
+    l.position.z = zTrack + 0.3;
+    const [x0, x1] = l.userData.range;
+    const near = boardU >= x0 - 0.06 && boardU <= x1 + 0.06 ? 1 : 0;
+    setLabel(l, near * ramp(t, S.ride.t0 + 1.6, S.ride.t0 + 2.0) * (1 - ramp(t, S.ride.t1 - 2.6, S.ride.t1 - 2.0)));
+  }
+  const drawFrac = ramp(t, final0 + 0.2, final0 + 2.4);
+  if (pathTube) setDraw(pathTube, drawFrac);
+  const drawnU = lerp(pathU0, pathU1, drawFrac);
+  for (const m of overlayTubes) {
+    const [a, b] = m.userData.span;
+    setDraw(m, (drawnU - a) / (b - a));
+  }
+  for (const m of markers) {
+    const on = drawFrac > 0 && drawnU >= m.userData.u - 1e-4 ? 1 : 0;
+    m.material.opacity = on * (1 - 0.6 * ramp(t, S.ride.t0, S.ride.t0 + 1.5));
+    m.visible = on > 0;
+  }
+  for (const l of featureLabels) {
+    setLabel(l, (drawFrac > 0 && drawnU >= l.userData.u ? ramp(t, final0 + 0.4, final0 + 1.0) : 0));
+  }
+
+  // Board, trail and grind sparks.
+  const r = S.ride;
+  const riding = t >= r.t0 + 0.8 && path.length >= 2;
+  board.visible = riding;
+  const L = board.userData.L;
+  const zPlay = zTrack + 0.07;
+  if (riding) {
+    const bu = rideU(t);
+    const p = ridePoint(path, bu, zPlay);
+    const ahead = ridePoint(path, Math.min(bu + 0.004, pathU1), zPlay);
+    const behind = ridePoint(path, Math.max(bu - 0.004, pathU0), zPlay);
+    board.position.copy(p);
+    board.rotation.z = Math.atan2(ahead.y - behind.y, ahead.x - behind.x);
+    let flip = 0;
+    for (const [a, b] of jumps) if (bu > a && bu < b) flip = smooth((bu - a) / (b - a)) * Math.PI * 2;
+    // Tilt the deck toward the camera; seen exactly side-on it is a sliver.
+    boardInner.rotation.x = 0.9 + flip;
+    board.scale.setScalar(ramp(t, r.t0 + 0.8, r.t0 + 1.4));
+  }
+  const onGrind = riding && grinds.some(([a, b]) => { const bu = rideU(t); return bu >= a && bu <= b; });
+  trail.forEach((s, i) => {
+    const tu = rideU(t - i * 0.035);
+    const vis = riding && t - i * 0.035 > r.t0 + 1.4;
+    s.visible = vis;
+    if (!vis) return;
+    s.position.copy(ridePoint(path, tu, zPlay)).add(new THREE.Vector3(0, L * 0.06, 0));
+    const k = 1 - i / trail.length;
+    s.scale.setScalar(L * 0.28 * k + L * 0.06);
+    s.material.opacity = 0.4 * k;
+    s.material.color.copy(onGrind ? hdr(0xff8a2a, 1.4) : hdr(0xc4ff3a, 1.1));
+  });
+  sparks.forEach((s, i) => {
+    s.visible = onGrind;
+    if (!onGrind) return;
+    const ph = fract(t * 2.6 + hash(i));
+    const dir = hash(i + 7) * 2 - 1;
+    s.position.copy(board.position).add(new THREE.Vector3(-ph * L * 1.4, ph * L * (0.5 + dir * 0.4) - ph * ph * L * 0.9, 0.05));
+    s.scale.setScalar(L * 0.1 * (1 - ph) + 0.01);
+    s.material.opacity = 1 - ph;
+  });
+
+  // Cinematic camera.
+  if (!manualCamera) {
+    const st = stageAt(t);
+    const prevKey = { photo: K.front, depth: K.front, concepts: K.relief, sam: K.concepts, layers: K.sam, design: K.layers, ride: K.design };
+    const thisKey = { photo: K.front, depth: K.relief, concepts: K.concepts, sam: K.sam, layers: K.layers, design: K.design, ride: K.design };
+    blendCam(prevKey[st.key], thisKey[st.key], ramp(t, st.t0, st.t0 + 2.6));
+    if (st.key === "ride" && path.length >= 2) {
+      const bp = ridePoint(path, rideU(t), 0);
+      const d = fitDistance();
+      // Keep the shot inside the photo even when the board is near an edge.
+      const cx = clamp(bp.x, -W * 0.22, W * 0.22);
+      const follow = [
+        new THREE.Vector3(cx - W * 0.1, bp.y + H * 0.12, d * 0.68),
+        new THREE.Vector3(cx + W * 0.06, bp.y - H * 0.02, 0),
+      ];
+      const k = ramp(t, r.t0 + 0.4, r.t0 + 2.4) * (1 - ramp(t, r.t1 - 2.6, r.t1 - 0.6));
+      const end = ramp(t, r.t1 - 2.6, r.t1 - 0.6);
+      const overview = K.overview;
+      const base = end > 0 ? overview : K.design;
+      camPos.lerpVectors(base[0], follow[0], k);
+      camTarget.lerpVectors(base[1], follow[1], k);
+    }
+    // Gentle drift so held shots never look frozen.
+    camPos.x += Math.sin(t * 0.35) * 0.12;
+    camPos.y += Math.sin(t * 0.27) * 0.06;
+    camera.position.copy(camPos);
+    controls.target.copy(camTarget);
+    camera.lookAt(camTarget);
+  }
+}
+
+// ---------------------------------------------------------------- loop
+let time = 0, playing = !CAPTURE, scrubbing = false, last = performance.now();
+function renderAt(t) {
+  time = clamp(t, 0, DURATION);
+  applyState(time);
+  updateUI(time);
+  if (manualCamera) controls.update();
+  composer.render();
+  labelRenderer.render(scene, camera);
+}
+
+function tick(now) {
+  // Generous cap: slow GPUs drop frames but still play in real time.
+  const dt = Math.min(0.25, (now - last) / 1000);
+  last = now;
+  if (playing && !scrubbing) {
+    time += dt;
+    if (time >= DURATION) { time = DURATION; playing = false; setPlayIcon(); }
+  }
+  renderAt(time);
+  requestAnimationFrame(tick);
+}
+
+function setPlayIcon() { document.getElementById("play").textContent = playing ? "❚❚" : "▶"; }
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  bloom.setSize(window.innerWidth, window.innerHeight);
+  labelRenderer.setSize(window.innerWidth, window.innerHeight);
+}
+window.addEventListener("resize", onResize);
+
+document.getElementById("play").onclick = () => { if (time >= DURATION) time = 0; playing = !playing; setPlayIcon(); };
+const scrub = document.getElementById("scrub");
+scrub.addEventListener("input", () => { scrubbing = true; time = (scrub.value / 1000) * DURATION; });
+scrub.addEventListener("change", () => { scrubbing = false; });
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Space") { e.preventDefault(); document.getElementById("play").click(); }
+  else if (e.key === "r" || e.key === "R") { time = 0; playing = true; manualCamera = false; setPlayIcon(); }
+  else if (e.key === "h" || e.key === "H") document.body.classList.toggle("hide-ui");
+  else if (e.key === "c" || e.key === "C") manualCamera = false;
+  else if (e.key >= "1" && e.key <= String(STAGES.length)) { time = STAGES[Number(e.key) - 1].t0; manualCamera = false; }
+});
+
+// ---------------------------------------------------------------- boot
+await build();
+buildUI();
+await document.fonts.ready;
+window.__showcase = { duration: DURATION, renderAt, stages: STAGES.map((s) => ({ key: s.key, t0: s.t0, t1: s.t1 })) };
+if (CAPTURE) renderAt(0); else requestAnimationFrame(tick);
+window.__showcaseReady = true;
+</script>
+</body>
+</html>

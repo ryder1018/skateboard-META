@@ -1,6 +1,6 @@
 # WSL CV Backend Documentation
 
-This module handles the computer vision pipeline for the SkateP project. It receives images, extracts depth maps using Depth Anything 3, generates object masks with SAM2 automatic mask generation, segments them into visual layers, and generates track points for Unity.
+This module handles the computer vision pipeline for the SkateP project. It receives images, extracts depth maps using Depth Anything 3, finds skateable objects (stairs, handrails, benches, ...) with SAM 3.1 text prompts through the Meta Model API, segments them into visual layers, and generates track points for Unity.
 
 ## 1. Environment Setup & Execution
 
@@ -12,7 +12,13 @@ We use `uv` for dependency management.
 uv sync
 ```
 
-`uv sync` installs the SAM2 package from `facebookresearch/sam2`. The first inference may also download the configured SAM2 Hugging Face model, `facebook/sam2.1-hiera-small` by default.
+SAM 3.1 runs through the Meta Model API, so no SAM weights are downloaded. Set your API key before starting the server:
+
+```bash
+export MODEL_API_KEY=<your Meta Model API key>
+```
+
+`uv sync` installs `meta-sam-parser`, Meta's decoder for SAM 3.1 box/mask output.
 
 ### Running the API Server
 Start the FastAPI backend server:
@@ -27,14 +33,30 @@ uv run python scripts/pipeline.py ./assets/pictures/whisky.jpg
 ```
 Intermediate outputs will be saved to `outputs/` and `Send2Unity/`.
 
+### Trying Photos
+Drop photos into `wsl-cv/photos/` and run `./run_photos.sh` (inside the project env). Each new photo gets `showcase/<name>/showcase.html`, and `showcase/index.html` links them all; already-built photos are skipped (`--force` rebuilds, `--video` also renders MP4s). For a single photo anywhere on disk: `./try_photo.sh <photo> [name] [--video]`.
+
+### 3D Pipeline Showcase
+Every `scripts/pipeline.py` run also writes `<send2unity_dir>/showcase.html`: a self-contained three.js page that replays the run (photo → DA3 depth relief → Muse Spark concepts → SAM 3.1 objects → 2.5D layers → Muse Spark design/verify loop → ride). Open it in a browser (it loads three.js from a CDN). Controls: space play/pause, R restart, 1–7 jump to a step, drag to orbit, C back to the cinematic camera, H hide the UI for screen recording.
+
+To render the same sequence to MP4 locally (headless Chromium + ffmpeg, ~1 s per 1080p frame):
+```bash
+pip install playwright && python -m playwright install chromium   # once
+python scripts/render_showcase.py <send2unity_dir>/showcase.html --out showcase.mp4
+```
+
 ## 2. Repository Map
 
 *   `scripts/infer.py`: Active runtime API entrypoint (FastAPI server). It creates one isolated `_jobs/` directory per request and packages the Unity-facing JSON response.
 *   `scripts/pipeline.py`: Standalone pipeline execution script.
-*   `scripts/run_inference_depth_sam2.py`: DA3 depth generation plus SAM2 mask generation.
-*   `scripts/sam2_segmentation.py`: SAM2 automatic masks, mask filtering, and non-overlapping label-map export.
+*   `scripts/run_inference_depth_sam31.py`: DA3 depth generation plus SAM 3.1 segmentation; also writes `{base}_sam31_objects.json` (label, box, score, label id per object).
+*   `scripts/sam31_segmentation.py`: Muse Spark first proposes this photo's concepts to segment (skateable + scenery); then SAM 3.1 API calls (one noun-phrase prompt per request), mask decoding, and non-overlapping label-map export. Falls back to a fixed concept list if the proposal fails.
+*   `scripts/muse_spark.py`: Shared Muse Spark client (Responses API, JSON-schema structured output). Model defaults to `muse-spark-1.3-contributor`; override with `MUSE_SPARK_MODEL_ID`.
 *   `scripts/cut_img.py`: Depth-sorted visual layer generation (foreground, gameplay, background) plus background inpainting.
-*   `scripts/extract_track.py`: Smooth playable track point extraction from the dedicated track/ground-region mask.
+*   `scripts/level_designer.py`: Muse Spark picks which SAM 3.1 object(s) are the riding surface (verified against the masks: must span the scene at ground level; violations are fed back for repair, up to `MUSE_SPARK_MAX_ATTEMPTS`, default 3). Also continues the track behind objects standing on the ground, finds the occluders the skater passes behind (closer than the track in DA3 depth), and has Muse Spark write the mission. Adds a `level` field to `track_points.json` (mission, surfaces, occluders, and `render_order`: background → gameplay → track/skater → foreground, matching Unity's Background / Midground / Foreground sorting layers) and fills Unity's existing `occluded_segments` (point-index ranges the foreground draws over). Writes `level_vis.png` / `level_design_log.json`. `cut_img.py` also writes `layers.json` (which SAM region went into which layer image).
+*   `scripts/extract_track.py`: The original track extraction: the smoothed top edge of the track region (`layer_00_mask.npy`).
+*   `scripts/showcase.py` + `scripts/showcase_template.html`: Builds the self-contained 3D pipeline showcase page from one run's outputs.
+*   `scripts/render_showcase.py`: Renders the showcase page to MP4 frame by frame (Playwright + ffmpeg).
 *   `scripts/depth_adapter.py`: Wrapper and integration point for the DA3 model.
 *   `models/depth_anything_3/`: Vendor/model code (Do not modify).
 *   `Send2Unity/`: Generated Unity-facing outputs for manual runs.
@@ -45,15 +67,15 @@ Intermediate outputs will be saved to `outputs/` and `Send2Unity/`.
 ### Execution Flow
 1. Windows Server sends `POST /infer` with an image.
 2. `scripts/infer.py` creates an isolated job environment in `_jobs/` with the uploaded image, symlinked scripts/models, and wrapper scripts for path-sensitive steps.
-3. Step 1 runs `scripts/run_inference_depth_sam2.py` in process to generate a 16-bit DA3 depth map and a SAM2 label map.
-4. Step 2 runs `scripts/cut_img.py` through a wrapper to sort accepted regions by average depth, export foreground/gameplay/background layers, and perform occlusion inpainting.
-5. Step 3 runs `scripts/extract_track.py` through a wrapper to extract smooth playable track points from `layer_00_mask.npy`, the dedicated track/ground-region mask selected during Step 2.
+3. Step 1 runs `scripts/run_inference_depth_sam31.py` in process to generate a 16-bit DA3 depth map and a SAM 3.1 label map.
+4. Step 2 asks Muse Spark (`level_designer.plan_track`) which object is the ground and writes `{base}_track_surfaces.json`; then `scripts/cut_img.py` runs through a wrapper to sort regions by average depth, export foreground/gameplay/background layers, inpaint, and build the track region from the chosen surface (its original geometric selection is the fallback).
+5. Step 3 fills dips where objects stand on the ground (`repair_track_occlusions`), runs the original `scripts/extract_track.py` through a wrapper, then `finalize_level` adds mission, surfaces and occluders to `track_points.json`. The legacy `points` format is unchanged for Unity.
 6. `scripts/infer.py` packages everything into Base64 JSON and responds.
 
 ### Known Fragile Points
 *   **Job Orchestration**: `scripts/infer.py` uses isolated job directories, symlinks, and wrapper scripts to override hardcoded paths in path-sensitive legacy scripts. This is sensitive to script changes.
 *   **DA3 Vendor Dependency**: `models/depth_anything_3/` must remain untouched. Any API changes there require updates to `scripts/depth_adapter.py`.
-*   **SAM2 Runtime Dependency**: SAM2 is installed from GitHub and loads model weights from Hugging Face by default. Offline machines need the model cached ahead of time or `SAM2_MODEL_ID` pointed at an accessible local/HF model.
+*   **SAM 3.1 Runtime Dependency**: SAM 3.1 is called at `https://api.meta.ai/v1/responses` with model `sam-3.1`, so the server needs network access and `MODEL_API_KEY`. Setting `SAM31_SKATEABLE_PROMPTS` / `SAM31_SCENERY_PROMPTS` (comma-separated) skips the Muse Spark concept proposal and uses those lists.
 *   **Generated Folders**: Manual runs rely on `outputs/` and `Send2Unity/` folders being created correctly.
 
 ## 4. API Contract

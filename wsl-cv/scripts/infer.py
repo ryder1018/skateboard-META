@@ -36,7 +36,8 @@ _SCRIPTS_ROOT = Path(__file__).resolve().parent
 if str(_SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_ROOT))
 
-from run_inference_depth_sam2 import run_inference
+from level_designer import finalize_level, plan_track, repair_track_occlusions
+from run_inference_depth_sam31 import run_inference
 
 # ======================================================================
 # PIPELINE CONFIGURATION
@@ -56,8 +57,8 @@ class PipelineConfig:
     PYTHON: str = sys.executable
 
     # -- Pipeline script paths (relative to SCRIPTS_ROOT) --
-    STEP1_SCRIPT: str = "run_inference_depth_sam2.py"
-    STEP1_HELPER_SCRIPT: str = "sam2_segmentation.py"
+    STEP1_SCRIPT: str = "run_inference_depth_sam31.py"
+    STEP1_HELPER_SCRIPT: str = "sam31_segmentation.py"
     STEP2_SCRIPT: str = "cut_img.py"
     STEP3_SCRIPT: str = "extract_track.py"
 
@@ -84,6 +85,7 @@ class PipelineConfig:
     # base_name is derived from INPUT_FILENAME stem -> "input"
     DEPTH_16BIT_FILENAME: str = "input_depth_16bit.png"
     DEPTH_MASK_FILENAME: str = "input_depth_mask.npy"
+    SAM31_OBJECTS_FILENAME: str = "input_sam31_objects.json"
 
     # -- Step 2 outputs (written to <job>/Send2Unity/) --
     # TODO: ADAPT THESE OUTPUT FILENAMES TO YOUR CURRENT PIPELINE
@@ -166,7 +168,7 @@ def run_command(
     Parameters
     ----------
     cmd:
-        Command tokens, e.g. ["python", "run_inference_depth_sam2.py"].
+        Command tokens, e.g. ["python", "run_inference_depth_sam31.py"].
     cwd:
         Working directory for the child process.
     timeout:
@@ -229,7 +231,7 @@ def run_command(
 
 
 def run_step1_in_process(job_dir: Path, input_path: Path) -> None:
-    """Run DA3 + SAM2 in this FastAPI process so model caches persist."""
+    """Run DA3 + SAM 3.1 in this FastAPI process so the depth model cache persists."""
     out_dir = job_dir / "outputs" / "inference_results"
     logger.info(
         "[Step1:DepthInference] Running in-process with persistent models "
@@ -347,6 +349,46 @@ def load_json(path: Path) -> dict[str, Any]:
             status_code=500,
             detail=f"Could not parse JSON from {path.name}: {exc}",
         ) from exc
+
+
+def run_track_planning(job_dir: Path, input_path: Path) -> dict[str, Any] | None:
+    """Let Muse Spark choose the track surface. None means cut_img.py uses its heuristic."""
+    inference_dir = job_dir / "outputs" / "inference_results"
+    started = datetime.now(timezone.utc)
+    try:
+        plan = plan_track(
+            str(input_path),
+            str(inference_dir / CFG.DEPTH_MASK_FILENAME),
+            str(inference_dir / CFG.SAM31_OBJECTS_FILENAME),
+        )
+    except Exception:
+        logger.exception("[Step2:TrackSurface] Muse Spark failed; using geometric track selection")
+        return None
+
+    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+    logger.info(
+        "[Step2:TrackSurface] Completed in %.1fs (attempts=%d): %s -- %s",
+        elapsed,
+        len(plan["attempts"]),
+        plan["surface_ids"],
+        plan["mission"],
+    )
+    return plan
+
+
+def run_level_finalize(job_dir: Path, input_path: Path, plan: dict[str, Any] | None) -> None:
+    """Add mission, surfaces and occluders to track_points.json; never fails the request."""
+    inference_dir = job_dir / "outputs" / "inference_results"
+    try:
+        finalize_level(
+            str(input_path),
+            str(inference_dir / CFG.DEPTH_MASK_FILENAME),
+            str(inference_dir / CFG.SAM31_OBJECTS_FILENAME),
+            str(job_dir / "Send2Unity"),
+            plan,
+        )
+    except Exception:
+        logger.exception("[Step3:LevelMetadata] Could not add level metadata; track points are unchanged")
 
 
 def find_required_outputs(job_dir: Path) -> dict[str, Path]:
@@ -536,10 +578,12 @@ async def infer(photo: UploadFile = File(...)):
         # 4. Prepare the job environment (symlinks + wrapper scripts)
         _prepare_job_environment(job_dir, input_path)
 
-        # 5. Run pipeline -- Step 1: Depth inference + SAM2 segmentation
+        # 5. Run pipeline -- Step 1: Depth inference + SAM 3.1 segmentation
         run_step1_in_process(job_dir, input_path)
 
-        # 6. Run pipeline -- Step 2: Layer cutting
+        # 6. Run pipeline -- Step 2: Muse Spark picks the track surface
+        #    (cut_img.py falls back to its heuristic if this fails), then layer cutting
+        plan = run_track_planning(job_dir, input_path)
         run_command(
             [CFG.PYTHON, "_run_step2.py"],
             cwd=job_dir,
@@ -547,13 +591,22 @@ async def infer(photo: UploadFile = File(...)):
             step_label="Step2:CutLayers",
         )
 
-        # 7. Run pipeline -- Step 3: Track extraction
+        # 7. Run pipeline -- Step 3: Track extraction (top edge of the surface,
+        #    continued behind objects standing on it)
+        try:
+            repair_track_occlusions(
+                str(job_dir / "Send2Unity" / CFG.LAYER_MASK_FILENAME),
+                str(job_dir / "outputs" / "inference_results" / CFG.DEPTH_MASK_FILENAME),
+            )
+        except Exception:
+            logger.exception("[Step3:ExtractTrack] Occlusion repair failed; using the raw track mask")
         run_command(
             [CFG.PYTHON, "_run_step3.py"],
             cwd=job_dir,
             timeout=CFG.STEP3_TIMEOUT,
             step_label="Step3:ExtractTrack",
         )
+        run_level_finalize(job_dir, input_path, plan)
 
         # 8. Locate required outputs
         outputs = find_required_outputs(job_dir)

@@ -23,4 +23,4 @@ plyfile
 pillow_heif
 safetensors
 pycolmap
-git+https://github.com/facebookresearch/sam2.git
+meta-sam-parser>=0.1.0

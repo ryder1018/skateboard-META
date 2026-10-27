@@ -1,8 +1,10 @@
 import os
 import argparse
-from run_inference_depth_sam2 import run_inference
+from run_inference_depth_sam31 import run_inference
 from cut_img import process_cut_img
 from extract_track import extract_smooth_track
+from level_designer import finalize_level, plan_track, repair_track_occlusions, surfaces_path_for
+from showcase import build_showcase
 
 def run_pipeline(image_path: str, out_dir: str = "./outputs/inference_results", send2unity_dir: str = "./Send2Unity"):
     if not os.path.exists(image_path):
@@ -19,7 +21,7 @@ def run_pipeline(image_path: str, out_dir: str = "./outputs/inference_results", 
     print(f"=============================================")
     run_inference(image_path, out_dir=out_dir)
     
-    # run_inference_depth_sam2 saves DA3 depth and the SAM2 label map:
+    # run_inference_depth_sam31 saves DA3 depth and the SAM 3.1 label map:
     # {base_name}_depth_16bit.png and {base_name}_depth_mask.npy
     depth16_path = os.path.join(out_dir, f"{base_name}_depth_16bit.png")
     mask_path = os.path.join(out_dir, f"{base_name}_depth_mask.npy")
@@ -29,7 +31,19 @@ def run_pipeline(image_path: str, out_dir: str = "./outputs/inference_results", 
         return
 
     print(f"\n=============================================")
-    print(f"--- Step 2: Cutting Image ---")
+    print(f"--- Step 2: Choosing Track Surface (Muse Spark) ---")
+    print(f"=============================================")
+    objects_path = os.path.join(out_dir, f"{base_name}_sam31_objects.json")
+    if os.path.exists(surfaces_path_for(mask_path)):
+        os.remove(surfaces_path_for(mask_path))
+    try:
+        plan = plan_track(image_path, mask_path, objects_path)
+    except Exception as exc:
+        print(f"Muse Spark surface choice failed ({exc}); using the geometric track selection.")
+        plan = None
+
+    print(f"\n=============================================")
+    print(f"--- Step 3: Cutting Image ---")
     print(f"=============================================")
     process_cut_img(image_path, depth16_path, mask_path, out_dir=send2unity_dir)
     
@@ -38,12 +52,13 @@ def run_pipeline(image_path: str, out_dir: str = "./outputs/inference_results", 
     out_json = os.path.join(send2unity_dir, "track_points.json")
     
     if not os.path.exists(layer_00_mask_path):
-        print("Error: Step 2 failed to produce layer_00_mask.npy.")
+        print("Error: Step 3 failed to produce layer_00_mask.npy.")
         return
 
     print(f"\n=============================================")
-    print(f"--- Step 3: Extracting Track ---")
+    print(f"--- Step 4: Extracting Track ---")
     print(f"=============================================")
+    repair_track_occlusions(layer_00_mask_path, mask_path)
     extract_smooth_track(
         layer_00_mask_path,
         out_json,
@@ -56,7 +71,13 @@ def run_pipeline(image_path: str, out_dir: str = "./outputs/inference_results", 
         clip_smooth_sigma=1.5,
         clip_top_margin_px=80.0,
     )
-    
+    finalize_level(image_path, mask_path, objects_path, send2unity_dir, plan)
+
+    print(f"\n=============================================")
+    print(f"--- Step 5: Building 3D Showcase ---")
+    print(f"=============================================")
+    build_showcase(image_path, out_dir, send2unity_dir, os.path.join(send2unity_dir, "showcase.html"))
+
     print(f"\nPipeline completed successfully! Unity outputs are in {send2unity_dir}")
 
 if __name__ == "__main__":

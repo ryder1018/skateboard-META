@@ -10,7 +10,7 @@ API_KEY = "112550191"
 
 # WSL API configuration
 WSL_API_URL = "http://127.0.0.1:9000/infer"
-WSL_TIMEOUT = 120  # Timeout for WSL API call in seconds
+WSL_TIMEOUT = 300  # Timeout for WSL API call in seconds (SAM 3.1 + Muse Spark calls)
 
 # Global job state
 job_lock = threading.Lock()

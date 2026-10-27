@@ -23,3 +23,11 @@ _legacy_2d/
 wsl-cv/Legacy/
 unity_client/MobileCameraCapture_old.cs
 .codex
+
+.env
+# Generated showcase runs: keep only the self-contained pages.
+wsl-cv/showcase/*/*
+!wsl-cv/showcase/*/showcase.html
+# Test photos dropped in for run_photos.sh (may show people; keep them local).
+wsl-cv/photos/*
+!wsl-cv/photos/.gitkeep

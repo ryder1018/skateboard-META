@@ -1,3 +1,4 @@
+import json
 import os
 
 import cv2
@@ -165,7 +166,7 @@ def _select_track_regions(
     max_combined_area_ratio,
 ):
     if not region_stats:
-        print("No SAM2 regions available for track selection; writing empty track mask.")
+        print("No SAM 3.1 regions available for track selection; writing empty track mask.")
         return []
 
     depths = np.array([entry["avg_depth"] for entry in region_stats], dtype=np.float32)
@@ -371,7 +372,17 @@ def process_cut_img(
     visual_stats = _build_region_stats(mask, depth16, include_zero=True)
     track_stats = _build_region_stats(mask, depth16, include_zero=False)
     visual_layers = _assign_depth_layers(visual_stats, max_layers)
-    track_regions = _select_track_regions(
+    # Muse Spark's verified surface choice (level_designer.plan_track) replaces
+    # the geometric guess when present; the heuristic stays as the fallback.
+    surfaces_path = mask_path.replace("_depth_mask.npy", "_track_surfaces.json")
+    chosen_ids = set()
+    if os.path.exists(surfaces_path):
+        with open(surfaces_path, encoding="utf-8") as f:
+            chosen_ids = set(json.load(f)["label_ids"])
+    chosen_regions = [entry for entry in track_stats if entry["id"] in chosen_ids]
+    if chosen_regions:
+        print(f"Track selection: using Muse Spark surface(s) {sorted(chosen_ids)}.")
+    track_regions = chosen_regions or _select_track_regions(
         track_stats,
         height,
         track_min_bottom_ratio,
@@ -433,6 +444,24 @@ def process_cut_img(
 
         pos_desc = "NEAR" if layer_idx == 0 else "FAR(Inpainted)" if layer_idx == max_layers - 1 else "MID"
         print(f"  Saved {filename} ({pos_desc}, Contains {len(layer_regions)} regions)")
+
+    # Which SAM region ended up in which layer, so later steps (and Unity)
+    # know what the foreground layer will draw in front of the skater.
+    with open(os.path.join(out_dir, "layers.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "layers": [
+                    {
+                        "file": f"merged_layer_{layer_idx + 1:02d}.png",
+                        "region_ids": sorted(int(entry["id"]) for entry in layer_regions if entry["id"] > 0),
+                    }
+                    for layer_idx, layer_regions in enumerate(visual_layers)
+                ],
+                "track_region_ids": sorted(int(entry["id"]) for entry in track_regions),
+            },
+            f,
+            indent=2,
+        )
 
     print("\n--- Done. Visual layers and dedicated track mask saved. ---")
 

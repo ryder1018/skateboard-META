@@ -2,7 +2,8 @@
 
 ## Start the WSL CV API
 
-Run this in WSL. Run `uv sync` after dependency changes or on a fresh machine; it installs DA3 dependencies, FastAPI upload support, and SAM2.
+Run this in WSL. Run `uv sync` after dependency changes or on a fresh machine; it installs DA3 dependencies, FastAPI upload support, and the SAM 3.1 output parser.
+On this machine the conda env `da3_skate` already has everything, so `conda activate da3_skate` works instead of `uv sync` / `uv run`.
 
 ```bash
 cd /home/mike/Projects/SkateP/SP25/wsl-cv
@@ -10,7 +11,7 @@ uv sync
 uv run python -m uvicorn scripts.infer:app --host 0.0.0.0 --port 9000
 ```
 
-The first SAM2 inference may download model weights for `facebook/sam2.1-hiera-large`.
+SAM 3.1 runs through the Meta Model API. Export `MODEL_API_KEY` in the same shell before starting the server.
 
 Check that Windows can reach the WSL API:
 

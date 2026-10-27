@@ -1,8 +1,8 @@
-# run_inference_depth_sam2.py
-import os, glob, cv2
+# run_inference_depth_sam31.py
+import os, glob, json, time, cv2
 import numpy as np, torch
 from depth_adapter import get_depth_model, predict_depth
-from sam2_segmentation import generate_sam2_label_map
+from sam31_segmentation import generate_sam31_label_map
 
 def colorize_labels(labels: np.ndarray, num_labels: int) -> np.ndarray:
     """Assigns random colors to each label id for visualization."""
@@ -74,6 +74,7 @@ def run_inference(
         print(f'  ✔ Prepared inference image at {inference_w}x{inference_h}')
         
         # Inference
+        depth_started = time.perf_counter()
         with torch.no_grad():
             prediction = predict_depth(model, inference_src, input_size=input_size)
         
@@ -81,6 +82,7 @@ def run_inference(
         if isinstance(depth, torch.Tensor):
             depth = depth.cpu().numpy()
         if depth.ndim == 3: depth = depth[0]
+        depth_seconds = time.perf_counter() - depth_started
 
         # Resize model outputs back to the Unity-facing output size.
         depth = cv2.resize(depth, (output_w, output_h), interpolation=cv2.INTER_LINEAR)
@@ -93,9 +95,8 @@ def run_inference(
                 depth16 = (depth / dmax * 65535).astype(np.uint16)
                 cv2.imwrite(os.path.join(out_dir, f'{base}_depth_16bit.png'), depth16)
                 
-                # --- SAM2 Automatic Masks ---
-                depth16_for_sam = cv2.resize(depth16, (inference_w, inference_h), interpolation=cv2.INTER_LINEAR)
-                labels, num_regions = generate_sam2_label_map(inference_img, depth16_for_sam)
+                # --- SAM 3.1 Text-Prompted Masks ---
+                labels, num_regions, objects, sam_info = generate_sam31_label_map(inference_img)
                 labels = cv2.resize(
                     labels.astype(np.uint16),
                     (output_w, output_h),
@@ -109,8 +110,26 @@ def run_inference(
                 # --- Export raw mask data for downstream precise cropping ---
                 cv2.imwrite(os.path.join(out_dir, f'{base}_depth_mask_raw.png'), labels.astype(np.uint8))
                 np.save(os.path.join(out_dir, f'{base}_depth_mask.npy'), labels)
-                
-                print(f'  ✔ SAM2 Segmentation Saved (Found {num_regions} regions)')
+
+                # --- Export the named object list (boxes normalized to 0..1) ---
+                for obj in objects:
+                    x1, y1, x2, y2 = obj.pop('box')
+                    obj['box'] = [x1 / inference_w, y1 / inference_h, x2 / inference_w, y2 / inference_h]
+                    obj['area_ratio'] = obj.pop('area') / float(inference_w * inference_h)
+                with open(os.path.join(out_dir, f'{base}_sam31_objects.json'), 'w', encoding='utf-8') as f:
+                    json.dump(
+                        {
+                            'width': output_w,
+                            'height': output_h,
+                            'concepts': sam_info['concepts'],
+                            'timings': {'da3': round(depth_seconds, 2), **sam_info['timings']},
+                            'objects': objects,
+                        },
+                        f,
+                        indent=2,
+                    )
+
+                print(f'  ✔ SAM 3.1 Segmentation Saved (Found {num_regions} regions)')
 
     print(f"--- Done. Results saved to {out_dir} ---")
 
