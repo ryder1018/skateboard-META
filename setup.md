@@ -6,7 +6,7 @@ Run this in WSL. Run `uv sync` after dependency changes or on a fresh machine; i
 On this machine the conda env `da3_skate` already has everything, so `conda activate da3_skate` works instead of `uv sync` / `uv run`.
 
 ```bash
-cd /home/mike/Projects/SkateP/SP25/wsl-cv
+cd <repo>/wsl-cv
 uv sync
 uv run python -m uvicorn scripts.infer:app --host 0.0.0.0 --port 9000
 ```
@@ -48,12 +48,23 @@ WSL_API_URL = "http://127.0.0.1:9000/infer"
 Run this in PowerShell from the `win-server` directory:
 
 ```powershell
-cd C:\path\to\SP25\win-server
+cd C:\path\to\SkateboardP\win-server
 .\venv\Scripts\Activate.ps1
 python server.py
 ```
 
 The gateway listens on port `5000`. Unity sends requests to this server, not directly to WSL.
+The venv needs `flask` and `requests` (`pip install flask requests`).
+
+For Unity Editor testing on this PC only, the gateway can also run in WSL (the `da3_skate` env has Flask);
+Windows reaches it at `127.0.0.1:5000` through WSL's localhost forwarding:
+
+```bash
+cd win-server && python server.py
+```
+
+An Android phone cannot reach a gateway inside WSL (NAT networking), so for the phone run it on Windows, allow
+inbound TCP 5000 in Windows Firewall, and enter the PC's Wi-Fi IPv4 address (`ipconfig`) in the app's Change IP box.
 
 ## Test the Unity-Style Upload Flow
 
@@ -66,8 +77,12 @@ Replace the photo path with your real image path:
 ```powershell
 curl.exe -X POST "http://127.0.0.1:5000/upload" `
   -H "X-API-KEY: 112550191" `
-  -F "photo=@C:\2026_Spring\sp25test\scenery.jpg;type=image/jpeg"
+  -F "photo=@C:\2026_Spring\sp25test\scenery.jpg;type=image/jpeg" `
+  -F "style=comic"
 ```
+
+`style` is optional: `original`, `comic`, `cyberpunk`, `snow`, `pixel` or `watercolor` (the Unity map style
+picker sends it). Without it the WSL server uses `$MUSE_IMAGE_STYLE`, or the photo's own pixels.
 
 Expected immediate response:
 
@@ -109,6 +124,22 @@ When processing succeeds, `result.json` should contain:
   }
 }
 ```
+
+## Unity Editor Smoke Test
+
+With the WSL API and the gateway running and `Parallax.unity` open in the Editor, use
+**Tools > SkateP > Pipeline Smoke Test...** and pick a photo. It enters Play mode, uploads the photo through
+`MobileCameraCapture` with the style selected in the picker, waits for the result panel, presses Start Game,
+checks that the level in play is the generated one, and writes screenshots plus `report.txt` to
+`Temp/PipelineSmokeTest/` in the Unity project. It skips `LocalLevelTester`'s baked levels for that run.
+
+It can also be started without touching the Editor by writing `Temp/pipeline_smoke_test.json` in the Unity project:
+
+```json
+{"photo": "C:/Users/Public/skatep_test/park.jpg", "style": "cyberpunk", "server": "127.0.0.1"}
+```
+
+An empty `Temp/pipeline_smoke_refresh` file makes the Editor re-import scripts edited outside Unity.
 
 ## Optional: Test WSL Directly
 

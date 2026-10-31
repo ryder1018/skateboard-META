@@ -13,9 +13,9 @@ import sys
 import cv2
 
 
-def _thumbnail(folder: str) -> str | None:
+def _thumbnail(folder: str, candidates: list[str] | None = None, size: int = 520) -> str | None:
     """Small inline JPEG of the run's level visualization (or its photo)."""
-    candidates = [os.path.join(folder, "level_vis.png")] + [
+    candidates = candidates or [os.path.join(folder, "level_vis.png")] + [
         os.path.join(folder, f) for f in sorted(os.listdir(folder)) if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
     ]
     for path in candidates:
@@ -23,7 +23,7 @@ def _thumbnail(folder: str) -> str | None:
         if image is None:
             continue
         height, width = image.shape[:2]
-        scale = 520 / max(width, height)
+        scale = size / max(width, height)
         image = cv2.resize(image, (max(1, int(width * scale)), max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
         ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 82])
         if ok:
@@ -44,16 +44,32 @@ def build_index(showcase_dir: str) -> str:
                 level = json.load(f).get("level", {})
         thumb = _thumbnail(folder)
         behind = ", ".join(o["label"] for o in level.get("occluders", [])) or "—"
+        page = f"{html.escape(name)}/showcase.html"
+        # One link per Muse Image style: opens the showcase settling on that art.
+        styles_path = os.path.join(folder, "styles.json")
+        style_links = []
+        if os.path.exists(styles_path):
+            with open(styles_path, encoding="utf-8") as f:
+                for style in json.load(f).get("styles", []):
+                    small = _thumbnail(folder, [os.path.join(folder, style["dir"], "styled.png")], size=160)
+                    if small:
+                        style_links.append(
+                            f'<a class="sty" style="--sc:{html.escape(style["color"])}" href="{page}?style={html.escape(style["name"])}" '
+                            f'title="{html.escape(style["label"])}"><img src="{small}" alt=""><span>{html.escape(style["label"])}</span></a>'
+                        )
         cards.append(
-            f"""<a class="card" href="{html.escape(name)}/showcase.html">
-  {'<img src="' + thumb + '" alt="">' if thumb else '<div class="noimg"></div>'}
-  <div class="body">
-    <div class="name">{html.escape(name)}</div>
-    <div class="mission">{html.escape(level.get("mission", "Ride the line"))}</div>
-    <div class="meta"><span>surface</span>{html.escape(", ".join(level.get("surfaces", [])) or "geometric")}</div>
-    <div class="meta"><span>behind</span>{html.escape(behind)}</div>
-  </div>
-</a>"""
+            f"""<article class="card">
+  <a class="main" href="{page}">
+    {'<img src="' + thumb + '" alt="">' if thumb else '<div class="noimg"></div>'}
+    <div class="body">
+      <div class="name">{html.escape(name)}</div>
+      <div class="mission">{html.escape(level.get("mission", "Ride the line"))}</div>
+      <div class="meta"><span>surface</span>{html.escape(", ".join(level.get("surfaces", [])) or "geometric")}</div>
+      <div class="meta"><span>behind</span>{html.escape(behind)}</div>
+    </div>
+  </a>
+  {'<div class="styles">' + "".join(style_links) + "</div>" if style_links else ""}
+</article>"""
         )
 
     page = f"""<!doctype html>
@@ -72,8 +88,16 @@ def build_index(showcase_dir: str) -> str:
   h1 span {{ color: var(--lime); }}
   header p {{ margin: 6px 0 0; color: var(--muted); font: 13px "JetBrains Mono", monospace; }}
   .grid {{ max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 18px; }}
-  .card {{ display: block; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; color: inherit; text-decoration: none; transition: border-color 0.15s, transform 0.15s; }}
+  .card {{ background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; transition: border-color 0.15s, transform 0.15s; }}
   .card:hover {{ border-color: rgba(196,255,58,0.5); transform: translateY(-2px); }}
+  .card a {{ color: inherit; text-decoration: none; }}
+  .main {{ display: block; }}
+  .styles {{ display: flex; gap: 6px; padding: 0 16px 16px; flex-wrap: wrap; }}
+  .sty {{ --sc: #e9eef6; flex: 1 1 0; min-width: 48px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #111722; transition: border-color 0.15s; }}
+  .sty img {{ width: 100%; aspect-ratio: 3 / 2; object-fit: cover; display: block; }}
+  .sty span {{ display: block; font: 10px "JetBrains Mono", monospace; color: var(--muted); padding: 3px 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .sty:hover, .sty:focus-visible {{ border-color: var(--sc); outline: none; }}
+  .sty:hover span {{ color: var(--text); }}
   .card img, .noimg {{ width: 100%; aspect-ratio: 16 / 10; object-fit: cover; display: block; background: #111722; }}
   .body {{ padding: 14px 16px 16px; }}
   .name {{ font: 600 12px "JetBrains Mono", monospace; color: var(--lime); letter-spacing: 0.04em; }}
@@ -86,7 +110,7 @@ def build_index(showcase_dir: str) -> str:
 <body>
 <header>
   <h1>Skate<span>P</span> levels</h1>
-  <p>{len(cards)} photo{'' if len(cards) == 1 else 's'} → playable 2.5D levels · open one to replay its pipeline in 3D</p>
+  <p>{len(cards)} photo{'' if len(cards) == 1 else 's'} → playable 2.5D levels · open one to replay its pipeline in 3D, or pick a Muse Image art style below it</p>
 </header>
 <main class="grid">
 {chr(10).join(cards) if cards else '<p class="empty">No showcases yet. Drop photos into photos/ and run ./run_photos.sh</p>'}

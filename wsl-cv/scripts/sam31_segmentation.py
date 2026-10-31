@@ -21,6 +21,20 @@ SKATEABLE_PROMPTS = ("stairs", "handrail", "bench", "ledge", "ramp", "ground", "
 SCENERY_PROMPTS = ("tree", "building", "car", "person")
 GROUND_PROMPTS = ("floor", "ground")
 
+# One sentence about the place itself, which muse_image.py gives Muse Image
+# when it fills in the background behind the front layers.
+SETTING_GUIDE = """setting: one sentence describing the place itself, so an artist could paint what lies
+behind the objects: indoor or outdoor, the floor or ground, the walls, the sky, the surface things
+stand on and the lighting. Do not name movable objects, furniture, vehicles or people. E.g. "a dim
+indoor desk corner: a wooden desk top with a dark mat against a plain grey wall"."""
+
+# Which concepts are the place itself; muse_image.py tells Muse Image not to
+# redraw the others (the things standing in it) when it fills the background.
+FIXED_GUIDE = """fixed: the phrases from your lists that are part of the place itself rather than things
+standing in it: ground, floors, roads, sidewalks, curbs, lawns, fields, stairs, water, walls,
+buildings, mountains, desk or table tops. People, furniture, vehicles, poles, signs, plants, trees
+and other objects are not fixed. Use the exact phrases."""
+
 CONCEPT_INSTRUCTIONS = """You plan image segmentation for a 2.5D side-scrolling skateboarding game
 that turns a player's photo into a level. List what a text-prompted segmentation model should
 find in this photo, as short concrete noun phrases (1-3 words, singular), e.g. "handrail",
@@ -35,16 +49,34 @@ scenery: other large, distinct objects that are not ridden but help separate for
 background (trees, buildings, cars, people, furniture...).
 
 Only list things that are clearly visible. Never list the same thing twice under different
-words, and never list "sky", "background" or the whole image."""
+words, and never list "sky", "background" or the whole image.
+
+""" + SETTING_GUIDE + "\n\n" + FIXED_GUIDE
 
 CONCEPT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["skateable", "scenery"],
+    "required": ["skateable", "scenery", "setting", "fixed"],
     "properties": {
         "skateable": {"type": "array", "items": {"type": "string"}},
         "scenery": {"type": "array", "items": {"type": "string"}},
+        "setting": {"type": "string"},
+        "fixed": {"type": "array", "items": {"type": "string"}},
     },
+}
+
+FIXED_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["fixed"],
+    "properties": {"fixed": {"type": "array", "items": {"type": "string"}}},
+}
+
+SETTING_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["setting"],
+    "properties": {"setting": {"type": "string"}},
 }
 
 
@@ -216,7 +248,7 @@ def _clean_concepts(phrases: list[str], limit: int, taken: set[str]) -> tuple[st
     return tuple(cleaned[:limit])
 
 
-def propose_concepts(image_bgr: np.ndarray) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def propose_concepts(image_bgr: np.ndarray) -> tuple[tuple[str, ...], tuple[str, ...], str, list[str]]:
     """Ask Muse Spark which concepts in this photo SAM 3.1 should segment."""
     from muse_spark import call_muse_spark, image_data_url
 
@@ -242,28 +274,72 @@ def propose_concepts(image_bgr: np.ndarray) -> tuple[tuple[str, ...], tuple[str,
     scenery = _clean_concepts(proposal["scenery"], _get_int_env("SAM31_MAX_SCENERY_CONCEPTS", 6), taken)
     if not skateable:
         raise RuntimeError("Muse Spark proposed no skateable concepts.")
-    return skateable, scenery
+    fixed = [" ".join(p.lower().split()) for p in proposal["fixed"]]
+    return skateable, scenery, proposal["setting"].strip(), [p for p in fixed if p in taken]
 
 
-def _resolve_prompts(image_bgr: np.ndarray) -> tuple[tuple[str, ...], tuple[str, ...], str]:
-    """Return (skateable, scenery, source) where source is "muse-spark", "env" or "default"."""
+def classify_fixed(concepts: list[str]) -> list[str]:
+    """Muse Spark's `fixed` subset of a run's concepts, for runs made before propose_concepts wrote one."""
+    from muse_spark import call_muse_spark
+
+    raw_text, _ = call_muse_spark(
+        "You sort the segmentation concepts of a photo.\n\n" + FIXED_GUIDE,
+        [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": json.dumps(concepts)}]}],
+        "fixed",
+        FIXED_SCHEMA,
+        "low",
+    )
+    fixed = {" ".join(p.lower().split()) for p in json.loads(raw_text)["fixed"]}
+    return [c for c in concepts if c in fixed]
+
+
+def describe_setting(image_bgr: np.ndarray) -> str:
+    """Muse Spark's one-sentence setting, for runs made before propose_concepts wrote one."""
+    from muse_spark import call_muse_spark, image_data_url
+
+    raw_text, _ = call_muse_spark(
+        "Describe the place in this photo.\n\n" + SETTING_GUIDE,
+        [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Describe the setting of this photo."},
+                    {"type": "input_image", "image_url": image_data_url(image_bgr)},
+                ],
+            }
+        ],
+        "setting",
+        SETTING_SCHEMA,
+        "low",
+    )
+    return json.loads(raw_text)["setting"].strip()
+
+
+def _resolve_prompts(
+    image_bgr: np.ndarray,
+) -> tuple[tuple[str, ...], tuple[str, ...], str, str | None, list[str] | None]:
+    """Return (skateable, scenery, source, setting, fixed); source is "muse-spark", "env" or "default"."""
     if os.getenv("SAM31_SKATEABLE_PROMPTS") is not None:
         print("  ✔ Using SAM 3.1 concepts from SAM31_SKATEABLE_PROMPTS / SAM31_SCENERY_PROMPTS")
         return (
             _get_prompts_env("SAM31_SKATEABLE_PROMPTS", SKATEABLE_PROMPTS),
             _get_prompts_env("SAM31_SCENERY_PROMPTS", SCENERY_PROMPTS),
             "env",
+            None,
+            None,
         )
     try:
-        skateable, scenery = propose_concepts(image_bgr)
+        skateable, scenery, setting, fixed = propose_concepts(image_bgr)
     except Exception as exc:
         print(f"  ! Muse Spark concept proposal failed ({exc}); using default concepts.")
-        return SKATEABLE_PROMPTS, SCENERY_PROMPTS, "default"
+        return SKATEABLE_PROMPTS, SCENERY_PROMPTS, "default", None, None
     # The track needs a ground to follow; a specific phrase ("foam floor") can
     # miss, so the generic ones are always queried too.
     skateable = tuple(dict.fromkeys(skateable + GROUND_PROMPTS))
     print(f"  ✔ Muse Spark concepts: skateable={list(skateable)} scenery={list(scenery)}")
-    return skateable, scenery, "muse-spark"
+    print(f"  ✔ Muse Spark setting: {setting}")
+    return skateable, scenery, "muse-spark", setting, list(dict.fromkeys(fixed + list(GROUND_PROMPTS)))
 
 
 def generate_sam31_label_map(
@@ -280,7 +356,7 @@ def generate_sam31_label_map(
         raise ValueError("image_bgr is required")
 
     started = time.perf_counter()
-    skateable, scenery, source = _resolve_prompts(image_bgr)
+    skateable, scenery, source, setting, fixed = _resolve_prompts(image_bgr)
     concepts_seconds = time.perf_counter() - started
     prompts = tuple(dict.fromkeys(skateable + scenery))
     started = time.perf_counter()
@@ -337,7 +413,7 @@ def generate_sam31_label_map(
         raise RuntimeError("SAM 3.1 found no usable objects for the configured prompts.")
 
     info = {
-        "concepts": {"skateable": list(skateable), "scenery": list(scenery), "source": source},
+        "concepts": {"skateable": list(skateable), "scenery": list(scenery), "source": source, "setting": setting, "fixed": fixed},
         "timings": {"concepts": round(concepts_seconds, 2), "sam31": round(sam_seconds, 2)},
     }
     return labels, next_label - 1, objects, info

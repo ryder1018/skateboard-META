@@ -4,9 +4,15 @@ from run_inference_depth_sam31 import run_inference
 from cut_img import process_cut_img
 from extract_track import extract_smooth_track
 from level_designer import finalize_level, plan_track, repair_track_occlusions, surfaces_path_for
+from muse_image import front_objects, load_setting, parse_styles, styles_from_env, stylize_run
 from showcase import build_showcase
 
-def run_pipeline(image_path: str, out_dir: str = "./outputs/inference_results", send2unity_dir: str = "./Send2Unity"):
+def run_pipeline(
+    image_path: str,
+    out_dir: str = "./outputs/inference_results",
+    send2unity_dir: str = "./Send2Unity",
+    styles: list[str] | None = None,
+):
     if not os.path.exists(image_path):
         print(f"Error: File not found at {image_path}")
         return
@@ -73,8 +79,24 @@ def run_pipeline(image_path: str, out_dir: str = "./outputs/inference_results", 
     )
     finalize_level(image_path, mask_path, objects_path, send2unity_dir, plan)
 
+    styles = styles_from_env() if styles is None else styles
     print(f"\n=============================================")
-    print(f"--- Step 5: Building 3D Showcase ---")
+    print(f"--- Step 5: Background Fill + Art Styles (Muse Image: {', '.join(styles) or 'background only'}) ---")
+    print(f"=============================================")
+    try:
+        stylize_run(
+            image_path,
+            send2unity_dir,
+            styles,
+            photo_background=True,
+            setting=load_setting(objects_path),
+            removed=front_objects(send2unity_dir, objects_path),
+        )
+    except Exception as exc:
+        print(f"Muse Image failed ({exc}); the level keeps the photo's art and inpainted background.")
+
+    print(f"\n=============================================")
+    print(f"--- Step 6: Building 3D Showcase ---")
     print(f"=============================================")
     build_showcase(image_path, out_dir, send2unity_dir, os.path.join(send2unity_dir, "showcase.html"))
 
@@ -85,6 +107,12 @@ if __name__ == "__main__":
     parser.add_argument("image_path", help="Path to the input image")
     parser.add_argument("--out_dir", default="./outputs/inference_results", help="Directory for intermediate inference outputs")
     parser.add_argument("--send2unity_dir", default="./Send2Unity", help="Directory for final Unity outputs")
+    parser.add_argument("--styles", default=None, help="Muse Image styles: comma-separated, 'all' or 'none' (default: $MUSE_IMAGE_STYLES or all)")
     args = parser.parse_args()
     
-    run_pipeline(args.image_path, out_dir=args.out_dir, send2unity_dir=args.send2unity_dir)
+    run_pipeline(
+        args.image_path,
+        out_dir=args.out_dir,
+        send2unity_dir=args.send2unity_dir,
+        styles=parse_styles(args.styles) if args.styles is not None else None,
+    )

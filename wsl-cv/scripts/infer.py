@@ -19,13 +19,15 @@ import shutil
 import subprocess
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+import cv2
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from PIL import Image, ImageDraw
 
@@ -37,7 +39,8 @@ if str(_SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_ROOT))
 
 from level_designer import finalize_level, plan_track, repair_track_occlusions
-from run_inference_depth_sam31 import run_inference
+from muse_image import STYLES, fill_enabled, fill_photo_background, front_objects, load_setting, prefetch_style, stylize_run
+from run_inference_depth_sam31 import _resize_to_width, run_inference
 
 # ======================================================================
 # PIPELINE CONFIGURATION
@@ -101,6 +104,11 @@ class PipelineConfig:
     # -- Step 3 outputs (written to <job>/Send2Unity/) --
     # TODO: ADAPT THESE OUTPUT FILENAMES TO YOUR CURRENT PIPELINE
     TRACK_JSON_FILENAME: str = "track_points.json"
+
+    # -- Step 4: Muse Image art style for the returned layers --
+    # Empty = the photo's own pixels (no Muse Image call). A request's
+    # `style` form field overrides it; see muse_image.STYLES for names.
+    DEFAULT_STYLE: str = os.getenv("MUSE_IMAGE_STYLE", "").strip().lower()
 
 
 CFG = PipelineConfig()
@@ -391,6 +399,37 @@ def run_level_finalize(job_dir: Path, input_path: Path, plan: dict[str, Any] | N
         logger.exception("[Step3:LevelMetadata] Could not add level metadata; track points are unchanged")
 
 
+def run_restyle(job_dir: Path, input_path: Path, style: str) -> dict[str, Any] | None:
+    """Repaint the level art with Muse Image; None keeps the photo's layers."""
+    started = datetime.now(timezone.utc)
+    try:
+        manifest = stylize_run(
+            str(input_path),
+            str(job_dir / "Send2Unity"),
+            [style],
+            setting=load_setting(str(job_dir / "outputs" / "inference_results" / CFG.SAM31_OBJECTS_FILENAME)),
+            removed=front_objects(
+                str(job_dir / "Send2Unity"), str(job_dir / "outputs" / "inference_results" / CFG.SAM31_OBJECTS_FILENAME)
+            ),
+        )
+    except Exception:
+        logger.exception("[Step4:Restyle] Muse Image failed; returning the photo's layers")
+        return None
+    entry = next((e for e in manifest["styles"] if e["name"] == style), None)
+    if entry is None:
+        logger.error("[Step4:Restyle] Muse Image failed (%s); returning the photo's layers", manifest["errors"].get(style))
+        return None
+    logger.info(
+        "[Step4:Restyle] %s in %.1fs (edge F1 %.3f -> %.3f, background: %s)",
+        style,
+        (datetime.now(timezone.utc) - started).total_seconds(),
+        entry["alignment"]["edge_f1_raw"],
+        entry["alignment"]["edge_f1"],
+        entry["background"]["source"],
+    )
+    return entry
+
+
 def find_required_outputs(job_dir: Path) -> dict[str, Path]:
     """Locate the four required output files and return their paths.
 
@@ -547,10 +586,12 @@ async def health():
 
 
 @app.post("/infer")
-async def infer(photo: UploadFile = File(...)):
+async def infer(photo: UploadFile = File(...), style: str | None = Form(None)):
     """Run the full depth -> layers -> track pipeline on an uploaded image.
 
-    Expects multipart/form-data with field name **photo**.
+    Expects multipart/form-data with field name **photo**, and optionally
+    **style** (a Muse Image art style; defaults to $MUSE_IMAGE_STYLE, empty =
+    the photo's own pixels).
 
     Returns
     -------
@@ -559,14 +600,22 @@ async def infer(photo: UploadFile = File(...)):
         images.foreground_base64  - base64 PNG of the nearest layer
         images.gameplay_base64    - base64 PNG of the middle layer
         images.background_base64  - base64 PNG of the farthest layer
-        metadata                  - parsed track_points.json dict
+        metadata                  - parsed track_points.json dict (+ art_style
+                                    when the layers were restyled)
     """
     job_dir: Path | None = None
+    # Muse Image calls that run alongside the rest of the pipeline.
+    executor = ThreadPoolExecutor(max_workers=2)
+    style = (style if style is not None else CFG.DEFAULT_STYLE).strip().lower()
+    if style in ("none", "original", "photo"):
+        style = ""
 
     try:
         # 1. Validate upload
         if not photo.filename:
             raise HTTPException(status_code=400, detail="No filename provided.")
+        if style and style not in STYLES:
+            raise HTTPException(status_code=400, detail=f"Unknown style '{style}'; choose from {sorted(STYLES)}.")
 
         # 2. Create isolated job directory
         job_dir = _create_job_dir()
@@ -577,6 +626,15 @@ async def infer(photo: UploadFile = File(...)):
 
         # 4. Prepare the job environment (symlinks + wrapper scripts)
         _prepare_job_environment(job_dir, input_path)
+
+        #    A restyle needs only the photo, so Muse Image starts now and runs
+        #    alongside DA3, SAM 3.1 and Muse Spark; stylize_run reuses its result.
+        restyle_future = None
+        photo_bgr = cv2.imread(str(input_path)) if style else None
+        if photo_bgr is not None:
+            restyle_future = executor.submit(
+                prefetch_style, style, _resize_to_width(photo_bgr, CFG.OUTPUT_WIDTH), str(job_dir / "Send2Unity")
+            )
 
         # 5. Run pipeline -- Step 1: Depth inference + SAM 3.1 segmentation
         run_step1_in_process(job_dir, input_path)
@@ -590,6 +648,19 @@ async def infer(photo: UploadFile = File(...)):
             timeout=CFG.STEP2_TIMEOUT,
             step_label="Step2:CutLayers",
         )
+        #    The photo's own art: Muse Image fills the background layer behind
+        #    the front layers, alongside track extraction.
+        background_future = None
+        if not style and fill_enabled():
+            background_future = executor.submit(
+                fill_photo_background,
+                str(input_path),
+                str(job_dir / "Send2Unity"),
+                setting=load_setting(str(job_dir / "outputs" / "inference_results" / CFG.SAM31_OBJECTS_FILENAME)),
+                removed=front_objects(
+                    str(job_dir / "Send2Unity"), str(job_dir / "outputs" / "inference_results" / CFG.SAM31_OBJECTS_FILENAME)
+                ),
+            )
 
         # 7. Run pipeline -- Step 3: Track extraction (top edge of the surface,
         #    continued behind objects standing on it)
@@ -609,10 +680,37 @@ async def infer(photo: UploadFile = File(...)):
         run_level_finalize(job_dir, input_path, plan)
 
         # 8. Locate required outputs
+        if background_future is not None:
+            try:
+                logger.info("[Step2:Background] %s", background_future.result())
+            except Exception:
+                logger.exception("[Step2:Background] Muse Image fill failed; keeping the inpainted background")
         outputs = find_required_outputs(job_dir)
-
-        # 9. Build response
         metadata = load_json(outputs["metadata"])
+
+        # 9. Optional: Muse Image repaints the art; the layers keep their
+        #    SAM 3.1 / DA3 alphas, so the track and occluders are unchanged.
+        if restyle_future is not None:
+            try:
+                restyle_future.result()
+            except Exception:
+                logger.exception("[Step4:Restyle] Early Muse Image call failed; trying again")
+        art = run_restyle(job_dir, input_path, style) if style else None
+        if art is not None:
+            style_dir = job_dir / "Send2Unity" / art["dir"]
+            outputs["foreground"] = style_dir / CFG.FOREGROUND_FILENAME
+            outputs["gameplay"] = style_dir / CFG.GAMEPLAY_FILENAME
+            outputs["background"] = style_dir / CFG.BACKGROUND_FILENAME
+            if art["track_color"]:
+                metadata["track_color"] = art["track_color"]
+            metadata["art_style"] = {
+                "name": art["name"],
+                "label": art["label"],
+                "model": "muse-image",
+                "edge_f1": art["alignment"]["edge_f1"],
+            }
+
+        # 10. Build response
         response_data = {
             "images": {
                 "preview_base64": encode_preview_base64(
@@ -639,7 +737,9 @@ async def infer(photo: UploadFile = File(...)):
             status_code=500, detail=f"Internal error: {exc}"
         ) from exc
     finally:
-        # 10. Clean up job directory
+        # Unfinished Muse Image calls only write into the job directory below.
+        executor.shutdown(wait=False, cancel_futures=True)
+        # 11. Clean up job directory
         if job_dir and job_dir.exists():
             try:
                 shutil.rmtree(job_dir)

@@ -5,7 +5,7 @@
 ## 1. Project Overview
 This project implements a **photo-to-playable-level pipeline** for a Unity skateboard game. 
 - **Input:** A real-world 2D image captured by a mobile device.
-- **Processing:** Depth extraction, semantic segmentation, occlusion inpainting, and track path generation.
+- **Processing:** Depth extraction, semantic segmentation, occlusion inpainting, track path generation, and optional Muse Image art restyling (comic, cyberpunk, snow, pixel, watercolor) that reuses the same layer masks.
 - **Output:** A JSON payload containing Base64 encoded layered images (foreground/gameplay/background) and 2D track points that Unity procedurally generates into a 3D playable level.
 
 ---
@@ -56,7 +56,7 @@ sequenceDiagram
         Win-->>Mobile: {"status":"accepted"}
         Win->>WSL: Internal POST /infer (multipart/form-data: `photo`)
 
-        Note over WSL: 1. DA3 Depth + SAM 3.1 Masks<br/>2. Depth-Sorted Layer Inpainting<br/>3. Track Extraction
+        Note over WSL: 1. DA3 Depth + SAM 3.1 Masks<br/>2. Depth-Sorted Layer Inpainting<br/>3. Track Extraction<br/>4. (optional) Muse Image restyle
 
         WSL-->>Win: JSON (Base64 layers + track metadata)
         Win->>Win: Store latest job state/result
@@ -78,6 +78,17 @@ Important runtime details:
   reference script called `ApplyPayload(payload)` and handled only one image at a time.
 - Metadata is backed up to `Application.persistentDataPath/schema_XX.json` for each batch item, and also to
   `schema.json` for compatibility with the older single-result behavior.
+- Art style: when the WSL server runs with `MUSE_IMAGE_STYLE=<comic|cyberpunk|snow|pixel|watercolor>` (or a request
+  sends the form field `style`), the three layer images are Muse Image restyles cut with the same masks, and
+  `metadata.art_style` / `metadata.track_color` describe them. The response shape is unchanged.
+- Unity map style picker: `ArtStyleSelector.cs` adds a "MAP STYLE" row (Original, Comic, Cyberpunk, Snow, Pixel,
+  Watercolor) under the upload panel. `MobileCameraCapture` sends the choice as the `style` field on `/upload`;
+  `win-server` forwards it to `/infer` ("original" = the photo's own pixels). The result panel shows the style and
+  `metadata.level.mission`.
+- Timing: one photo takes about 45-150 s (SAM 3.1 + Muse Spark retries + Muse Image), so Unity polls by elapsed time
+  (`processingTimeoutSeconds`, default 320 s) instead of a fixed attempt count.
+- `LocalLevelTester.applyOnStart` only auto-loads its baked levels in the Editor; device builds start at the
+  photo capture flow unless `applyOnStartInBuilds` is ticked.
 
 ### JSON Payload Contract (WSL -> Win -> Unity)
 The CV backend returns the following structure:

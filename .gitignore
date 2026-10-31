@@ -31,3 +31,9 @@ wsl-cv/showcase/*/*
 # Test photos dropped in for run_photos.sh (may show people; keep them local).
 wsl-cv/photos/*
 !wsl-cv/photos/.gitkeep
+
+# Gateway debug copy of the last upload
+win-server/captures/
+
+# Personal notes and hackathon plans
+doc/

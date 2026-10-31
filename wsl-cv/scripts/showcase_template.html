@@ -81,6 +81,29 @@
   .attempt .surf { font: 11px var(--mono); color: var(--text); margin-bottom: 6px; }
   .notes { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 10px; }
 
+  .styles { top: 24px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; padding: 6px; }
+  .styles .tag { font: 600 10px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 0 10px 0 8px; line-height: 1.35; white-space: nowrap; }
+  .sty { --sc: #e9eef6; display: flex; align-items: center; gap: 8px; padding: 5px 12px 5px 5px; border-radius: 10px; border: 1px solid transparent; background: none; color: var(--muted); font: 500 13px var(--sans); cursor: pointer; transition: color 0.15s, background 0.15s, border-color 0.15s; }
+  .sty img { width: 42px; height: 28px; object-fit: cover; border-radius: 6px; display: block; filter: saturate(0.55) brightness(0.75); transition: filter 0.15s; }
+  .sty:hover { color: var(--text); background: rgba(255, 255, 255, 0.04); }
+  .sty:hover img, .sty.on img { filter: none; }
+  .sty.on { color: var(--text); border-color: var(--sc); background: color-mix(in srgb, var(--sc) 12%, transparent); }
+  .sty:focus-visible { outline: 2px solid var(--sc); outline-offset: 2px; }
+  @media (max-width: 1480px) {
+    .styles .tag { display: none; }
+    .sty { padding: 6px 10px; }
+    .sty img { display: none; }
+    .hint { display: none; }  /* collides with the playback bar at laptop widths */
+  }
+  /* Captured frames are rendered one at a time: no transitions, or a frame shows the previous state. */
+  body.capture .sty, body.capture .sty img { cursor: default; transition: none; }
+  .srow { display: grid; grid-template-columns: 10px 1fr auto auto; gap: 10px; align-items: center; font: 12px var(--mono); padding: 5px 8px; margin: 0 -8px; border-radius: 7px; }
+  .srow i { width: 10px; height: 10px; border-radius: 3px; display: block; }
+  .srow b { font-weight: 400; color: var(--muted); min-width: 38px; text-align: right; }
+  .srow.on { background: rgba(255, 255, 255, 0.06); }
+  .srow.on span { color: var(--text); }
+  .srow span { color: #b9c2d2; }
+
   .scrim { left: 0; right: 0; bottom: 0; height: 300px; z-index: 4; pointer-events: none; background: linear-gradient(to bottom, rgba(6, 8, 12, 0), rgba(6, 8, 12, 0.88) 70%); }
   .caption { left: 50%; bottom: 92px; transform: translateX(-50%); text-align: center; width: min(1100px, 90vw); pointer-events: none; }
   .caption .t { font-size: 34px; font-weight: 600; letter-spacing: -0.015em; text-shadow: 0 2px 24px rgba(0,0,0,0.75); }
@@ -114,6 +137,7 @@
 </div>
 
 <div class="ui panel pipeline" id="pipeline"></div>
+<div class="ui panel styles" id="styles" hidden></div>
 
 <div class="ui panel detail" id="detail">
   <div class="card" data-card="photo">
@@ -145,8 +169,15 @@
     <div class="legend">
       <div><i style="background:#ffd36a"></i>Foreground · in front of the skater</div>
       <div><i style="background:var(--lime)"></i>Gameplay · the riding plane</div>
-      <div><i style="background:#7aa2ff"></i>Background · holes inpainted</div>
+      <div><i style="background:#7aa2ff"></i><span id="bg-legend">Background · holes inpainted</span></div>
     </div>
+  </div>
+  <div class="card" data-card="style">
+    <h2>Muse Image · restyle</h2>
+    <div class="big">Same photo, new art. The SAM 3.1 layers still fit.</div>
+    <div class="sub">style · drift along SAM outlines · time</div>
+    <div id="styleList"></div>
+    <div class="notes">Each render is registered back onto the photo (SIFT + RANSAC), checked for drift along the outlines the layers were cut on, and re-cut with the exact foreground / gameplay alphas, so the track and the occluders carry over unchanged.</div>
   </div>
   <div class="card" data-card="design">
     <h2>Muse Spark · choose → verify → repair</h2>
@@ -170,10 +201,11 @@
 
 <div class="ui panel controls">
   <button id="play" title="Play / pause (space)">❚❚</button>
+  <button id="sound" title="Sound on (M)">🔇</button>
   <input id="scrub" type="range" min="0" max="1000" value="0">
   <div class="clock" id="clock">0.0 / 0.0s</div>
 </div>
-<div class="ui hint">space play · R restart · 1–7 jump to step<br>drag to orbit · C cinematic camera · H hide UI</div>
+<div class="ui hint" id="hint"></div>
 <div id="error"></div>
 
 <script id="data" type="application/json">__SHOWCASE_DATA__</script>
@@ -200,6 +232,8 @@ import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 
 const DATA = JSON.parse(document.getElementById("data").textContent);
+// Muse Image filled in what the front layers hide (else cv2.inpaint did).
+const BACKGROUND_FILL = DATA.background === "muse-image";
 const params = new URLSearchParams(location.search);
 const CAPTURE = params.has("capture");
 if (CAPTURE) document.body.classList.add("capture");
@@ -324,6 +358,90 @@ function glowTexture() {
   return new THREE.CanvasTexture(c);
 }
 
+// ---------------------------------------------------------------- art styles
+// Index 0 is the photo itself; the rest are Muse Image restyles. Every image
+// surface cross-wipes from style A to style B with a glowing seam.
+const STYLES = [
+  { name: "original", label: "Photo", color: "#e9eef6", images: DATA.images, seconds: null, alignment: null },
+  ...(DATA.styles || []),
+];
+const requestedStyle = STYLES.findIndex((s) => s.name === params.get("style"));
+const FINAL_STYLE = requestedStyle >= 0 ? requestedStyle : Math.min(1, STYLES.length - 1);
+const STYLE_SLOT = 1.9, WIPE = 0.9;
+// Timeline tour: photo → every style in turn → the style the level keeps.
+const styleSeq = STYLES.map((_, i) => i);
+if (styleSeq[styleSeq.length - 1] !== FINAL_STYLE) styleSeq.push(FINAL_STYLE);
+const styleLength = STYLES.length > 1 ? 1.4 + (styleSeq.length - 1) * STYLE_SLOT + 0.8 : 0;
+const styleTex = [];
+const WIPE_GLSL = `
+  uniform float uWipe; uniform vec3 uEdge;
+  float wipeD(vec2 uv) { return uv.x * 0.82 + (1.0 - uv.y) * 0.18; }
+  float wipeK(vec2 uv) { float w = uWipe * 1.16 - 0.08; return smoothstep(w - 0.025, w + 0.025, wipeD(uv)); }
+  float wipeLine(vec2 uv) {
+    float w = uWipe * 1.16 - 0.08;
+    return (1.0 - smoothstep(0.0, 0.007, abs(wipeD(uv) - w))) * step(0.0001, uWipe) * step(uWipe, 0.9999);
+  }`;
+const PLAIN_VERT = `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
+
+function layerMaterial(tex) {
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    uniforms: { tA: { value: tex }, tB: { value: tex }, uWipe: { value: 0 }, uEdge: { value: new THREE.Color() }, uOpacity: { value: 1 } },
+    vertexShader: PLAIN_VERT,
+    fragmentShader: `
+      uniform sampler2D tA, tB; uniform float uOpacity; varying vec2 vUv;
+      ${WIPE_GLSL}
+      void main() {
+        vec4 c = mix(texture2D(tB, vUv), texture2D(tA, vUv), wipeK(vUv));
+        c.rgb = c.rgb * 0.9 + uEdge * wipeLine(vUv) * c.a;
+        gl_FragColor = vec4(c.rgb, c.a * uOpacity);
+        #include <colorspace_fragment>
+      }`,
+  });
+}
+
+let userStyle = null;   // a style picked with the buttons overrides the timeline tour
+const nowS = () => performance.now() / 1000;
+function timelineStyle(t) {
+  const S = STAGE.style;
+  if (!S || t < S.t0 + 1.4) return [0, 0, 0];
+  const k = (t - S.t0 - 1.4) / STYLE_SLOT;
+  const j = Math.floor(k);
+  if (j >= styleSeq.length - 1) return [FINAL_STYLE, FINAL_STYLE, 0];
+  const p = smooth(((k - j) * STYLE_SLOT) / WIPE);
+  return p >= 1 ? [styleSeq[j + 1], styleSeq[j + 1], 0] : [styleSeq[j], styleSeq[j + 1], p];
+}
+function currentStyle(t) {
+  if (!userStyle) return timelineStyle(t);
+  const p = smooth((nowS() - userStyle.at) / WIPE);
+  return p >= 1 ? [userStyle.to, userStyle.to, 0] : [userStyle.from, userStyle.to, p];
+}
+function pickStyle(i) {
+  if (CAPTURE) return;
+  const [a, b, p] = currentStyle(time);
+  const shown = p > 0.5 ? b : a;
+  if (shown === i && p === 0) return;
+  userStyle = { from: shown, to: i, at: nowS() };
+  if (soundLive()) styleSwoosh(sound.fx, sound.ctx.currentTime + 0.02, i);
+}
+const edgeColor = new THREE.Color();
+function applyStyle(t) {
+  const [a, b, p] = currentStyle(t);
+  const A = styleTex[a], B = styleTex[b], base = styleTex[0];
+  edgeColor.set(STYLES[b].color).multiplyScalar(2.6);
+  const ru = relief.material.uniforms;
+  ru.tPhoto.value = A.photo; ru.tPhotoB.value = B.photo; ru.uWipe.value = p; ru.uEdge.value.copy(edgeColor);
+  for (const [name, mesh] of Object.entries(layerMeshes)) {
+    const u = mesh.material.uniforms;
+    u.tA.value = A[name] || base[name];
+    u.tB.value = B[name] || base[name];
+    u.uWipe.value = p;
+    u.uEdge.value.copy(edgeColor);
+  }
+  return b;
+}
+
 // ---------------------------------------------------------------- timeline
 const designAttempts = DATA.attempts.length ? DATA.attempts : [{ attempt: 1, errors: [], mission: level.mission }];
 const failedCount = Math.max(0, designAttempts.length - 1);
@@ -337,10 +455,11 @@ const STAGES = [];
     ["depth", "Depth", "Depth Anything 3 · local GPU", 6.5],
     ["concepts", "Concepts", "Muse Spark 1.3", 5.5],
     ["sam", "Segmentation", "SAM 3.1 · Meta Model API", 6.5],
-    ["layers", "2.5D layers", "depth sort + inpaint", 6.5],
+    ["layers", "2.5D layers", BACKGROUND_FILL ? "depth sort + Muse Image fill" : "depth sort + inpaint", 6.5],
+    ["style", "Restyle", "Muse Image 1.0 · registered", styleLength],
     ["design", "Track", "Muse Spark 1.3 · verify loop", designLength],
     ["ride", "Ride", "playable level", 13],
-  ];
+  ].filter((s) => s[3] > 0);
   let t = 0;
   for (const [key, name, model, len] of spec) { STAGES.push({ key, name, model, t0: t, t1: t + len }); t += len; }
 }
@@ -391,6 +510,13 @@ async function build() {
     loadTex(DATA.images.foreground), loadTex(DATA.images.gameplay), loadTex(DATA.images.background),
     loadTex(DATA.images.surface),
   ]);
+  styleTex.push({ photo, foreground: fg, gameplay: gp, background: bg });
+  for (const s of STYLES.slice(1)) {
+    const [sp, sfg, sgp, sbg] = await Promise.all([
+      loadTex(s.images.photo), loadTex(s.images.foreground), loadTex(s.images.gameplay), loadTex(s.images.background),
+    ]);
+    styleTex.push({ photo: sp, foreground: sfg, gameplay: sgp, background: sbg });
+  }
 
   // Relief: one plane displaced by DA3 depth, cross-fading photo / depth / SAM.
   const segX = 320, segY = Math.max(32, Math.round(320 / DATA.aspect));
@@ -399,8 +525,9 @@ async function build() {
     new THREE.ShaderMaterial({
       transparent: true,
       uniforms: {
-        tPhoto: { value: photo }, tDepth: { value: depth }, tSam: { value: sam }, tDisp: { value: disp },
+        tPhoto: { value: photo }, tPhotoB: { value: photo }, tDepth: { value: depth }, tSam: { value: sam }, tDisp: { value: disp },
         uDisp: { value: 0 }, uDepthMix: { value: 0 }, uSamMix: { value: 0 }, uOpacity: { value: 1 },
+        uWipe: { value: 0 }, uEdge: { value: new THREE.Color() },
       },
       vertexShader: `
         uniform sampler2D tDisp; uniform float uDisp; varying vec2 vUv;
@@ -411,12 +538,13 @@ async function build() {
           gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
         }`,
       fragmentShader: `
-        uniform sampler2D tPhoto, tDepth, tSam; uniform float uDepthMix, uSamMix, uOpacity; varying vec2 vUv;
+        uniform sampler2D tPhoto, tPhotoB, tDepth, tSam; uniform float uDepthMix, uSamMix, uOpacity; varying vec2 vUv;
+        ${WIPE_GLSL}
         void main() {
-          vec3 c = texture2D(tPhoto, vUv).rgb;
+          vec3 c = mix(texture2D(tPhotoB, vUv).rgb, texture2D(tPhoto, vUv).rgb, wipeK(vUv));
           c = mix(c, texture2D(tDepth, vUv).rgb, uDepthMix);
           c = mix(c, texture2D(tSam, vUv).rgb, uSamMix);
-          gl_FragColor = vec4(c * 0.9, uOpacity);
+          gl_FragColor = vec4(c * 0.9 + uEdge * wipeLine(vUv), uOpacity);
           #include <colorspace_fragment>
         }`,
     })
@@ -439,10 +567,7 @@ async function build() {
   ];
   for (const [name, tex, order, color, title] of layerSpec) {
     if (!tex) continue;
-    const mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(W, H),
-      new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, color: new THREE.Color(0.9, 0.9, 0.9) })
-    );
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(W, H), layerMaterial(tex));
     mesh.renderOrder = order;
     scene.add(mesh);
     layerMeshes[name] = mesh;
@@ -568,15 +693,20 @@ function buildBoard() {
     boardInner.add(w);
   }
   const glow = glowTexture();
-  const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, color: hdr(0xc4ff3a, 1.0), transparent: true, opacity: 0.38, blending: THREE.AdditiveBlending, depthWrite: false }));
+  const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, color: hdr(0xc4ff3a, 1.0), transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false }));
   halo.position.y = L * 0.1;
   halo.scale.setScalar(L * 1.8);
   board.add(halo);
+  board.add(buildSkater(L));
 
   // Drawn with the track: after the gameplay layer, before the foreground.
   board.traverse((o) => {
     if (o.isMesh || o.isSprite) { o.material.transparent = true; o.renderOrder = 3.2; }
   });
+  // The deck tilts toward the camera, so its near half sits in front of the
+  // rider's feet: draw the rider after the board, over a deck that writes no depth.
+  boardInner.traverse((o) => { if (o.isMesh) o.material.depthWrite = false; });
+  skater.traverse((o) => { if (o.isMesh) o.renderOrder = 3.25; });
   board.userData.L = L;
   scene.add(board);
 
@@ -594,10 +724,217 @@ function buildBoard() {
   }
 }
 
+// ---------------------------------------------------------------- skater
+// A rider on the deck, so the ride reads as a skater instead of a board seen
+// edge-on. Sideways stance facing the camera (front foot toward +x, the travel
+// direction), built from primitives with toon shading and posed every frame
+// with 2-bone IK. An ink outline (a back-face hull) takes its color from the
+// art style on screen, so the rider looks drawn into the same picture. Units
+// are L, the board length; feet stand on the deck's top, which boardInner
+// tilts toward the camera.
+let skater, rig, skaterShadow;
+const BONES = { thigh: 0.3, shin: 0.3, torso: 0.42, upperArm: 0.25, foreArm: 0.23 };
+const UP = new THREE.Vector3(0, 1, 0);
+const _dir = new THREE.Vector3();
+// Per art style: outline ink and a faint tint of the scene's light.
+const SKATER_LOOKS = {
+  original: { ink: hdr(0x14171d, 1), tint: null },
+  comic: { ink: hdr(0x050505, 1), tint: null },
+  cyberpunk: { ink: hdr(0x3fe8ff, 1.5), tint: 0xff3fd8 },
+  snow: { ink: hdr(0x1d2a3a, 1), tint: 0x9fe3ff },
+  pixel: { ink: hdr(0x000000, 1), tint: null },
+  watercolor: { ink: hdr(0x4a3426, 1), tint: 0xffb38a },
+};
+
+function toonRamp() {
+  const tex = new THREE.DataTexture(new Uint8Array([110, 185, 255]), 3, 1, THREE.RedFormat);
+  tex.minFilter = tex.magFilter = THREE.NearestFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function shadowTexture() {
+  const c = document.createElement("canvas");
+  c.width = 128; c.height = 32;
+  const g = c.getContext("2d");
+  const grad = g.createRadialGradient(64, 16, 0, 64, 16, 64);
+  grad.addColorStop(0, "rgba(0,0,0,0.85)");
+  grad.addColorStop(0.55, "rgba(0,0,0,0.35)");
+  grad.addColorStop(1, "rgba(0,0,0,0)");
+  g.setTransform(1, 0, 0, 0.25, 0, 12);
+  g.fillStyle = grad;
+  g.fillRect(0, -48, 128, 128);
+  return new THREE.CanvasTexture(c);
+}
+
+function buildSkater(L) {
+  const ramp3 = toonRamp();
+  const ink = new THREE.MeshBasicMaterial({ color: 0x14171d, side: THREE.BackSide });
+  const toon = (color) => new THREE.MeshToonMaterial({ color, gradientMap: ramp3 });
+  const hoodie = toon(0xff6a3d), hoodieDark = toon(0xd94f2a), pants = toon(0x2c3446), skin = toon(0xe8b48c);
+  const hair = toon(0x2a1d16), white = toon(0xf4f4f2), sole = toon(0x3a3d44), capMat = toon(0x1b1f27);
+  const accent = new THREE.MeshToonMaterial({ color: 0xc4ff3a, gradientMap: ramp3, emissive: hdr(0xc4ff3a, 0.35) });
+  const o = 0.02;  // ink width
+  skater = new THREE.Group();
+  skater.scale.set(L, L, L * 0.6);  // flat in z, so it never pokes through the foreground layer
+  // A part with its ink hull; `hull` is the same shape grown by o.
+  const add = (parent, geo, hull, material) => {
+    const m = new THREE.Mesh(geo, material);
+    if (hull) m.add(new THREE.Mesh(hull, ink));
+    parent.add(m);
+    return m;
+  };
+  const capsule = (r, len) => [new THREE.CapsuleGeometry(r, len, 4, 12), new THREE.CapsuleGeometry(r + o, len, 4, 12)];
+  const sphere = (r) => [new THREE.SphereGeometry(r, 22, 16), new THREE.SphereGeometry(r + o, 22, 16)];
+  const box = (x, y, z) => [new THREE.BoxGeometry(x, y, z), new THREE.BoxGeometry(x + 2 * o, y + 2 * o, z + 2 * o)];
+  const limb = (r, len, material) => add(skater, ...capsule(r, len), material);
+
+  // Torso with a kangaroo pocket and drawstrings on the camera side.
+  const torso = limb(0.12, BONES.torso - 0.15, hoodie);
+  add(torso, new THREE.BoxGeometry(0.15, 0.07, 0.03), null, hoodieDark).position.set(0.01, -0.07, 0.105);
+  for (const x of [-0.03, 0.03]) add(torso, new THREE.CapsuleGeometry(0.008, 0.07, 2, 6), null, white).position.set(x, 0.07, 0.115);
+  // Hood bunched behind the neck.
+  const hood = add(skater, ...sphere(0.085), hoodieDark);
+
+  // Head turned toward +x: cap brim forward, hair at the back, ear and eye on the camera side.
+  const head = add(skater, ...sphere(0.11), skin);
+  add(head, new THREE.SphereGeometry(0.105, 20, 14, Math.PI * 0.5, Math.PI, 0, Math.PI * 0.62), null, hair).position.set(-0.012, -0.004, 0);
+  add(head, new THREE.SphereGeometry(0.118, 22, 10, 0, Math.PI * 2, 0, Math.PI / 2), null, capMat).position.y = 0.012;
+  // Brim at the forehead, a lime logo on the crown's camera side.
+  add(head, ...box(0.12, 0.022, 0.15), capMat).position.set(0.125, 0.03, 0);
+  add(head, new THREE.CircleGeometry(0.022, 16), null, accent).position.set(0.01, 0.06, 0.112);
+  add(head, new THREE.SphereGeometry(0.026, 10, 8), null, skin).position.set(-0.005, -0.012, 0.106);
+  const eye = add(head, new THREE.CapsuleGeometry(0.011, 0.016, 2, 6), null, new THREE.MeshBasicMaterial({ color: 0x14171d }));
+  eye.position.set(0.075, -0.012, 0.08);
+
+  // Baggy pants, sleeves to the wrist, then hands.
+  const thighs = [limb(0.068, BONES.thigh, pants), limb(0.068, BONES.thigh, pants)];
+  const shins = [limb(0.064, BONES.shin, pants), limb(0.064, BONES.shin, pants)];
+  const upperArms = [limb(0.055, BONES.upperArm, hoodie), limb(0.055, BONES.upperArm, hoodie)];
+  const foreArms = [limb(0.048, BONES.foreArm - 0.04, hoodie), limb(0.048, BONES.foreArm - 0.04, hoodie)];
+  const hands = [add(skater, ...sphere(0.045), skin), add(skater, ...sphere(0.045), skin)];
+
+  // White sneakers: dark sole, lime stripe on the camera side.
+  const shoes = [0, 1].map(() => {
+    const shoe = add(skater, ...box(0.16, 0.065, 0.1), white);
+    add(shoe, new THREE.BoxGeometry(0.17, 0.024, 0.106), null, sole).position.y = -0.042;
+    add(shoe, new THREE.BoxGeometry(0.09, 0.016, 0.01), null, accent).position.set(-0.005, 0.0, 0.052);
+    return shoe;
+  });
+
+  rig = { torso, hood, head, thighs, shins, upperArms, foreArms, hands, shoes, ink, tinted: [hoodie, hoodieDark, pants], style: null };
+  // Deck top center in board space: (0, 0.135 L) rotated by boardInner's 0.9 rad tilt.
+  skater.position.set(0, L * 0.135 * Math.cos(0.9), L * 0.135 * Math.sin(0.9));
+
+  // Soft contact shadow on the ground line, behind the board.
+  skaterShadow = new THREE.Mesh(
+    new THREE.PlaneGeometry(L * 1.5, L * 0.36),
+    new THREE.MeshBasicMaterial({ map: shadowTexture(), transparent: true, depthWrite: false, opacity: 0.55 })
+  );
+  skaterShadow.position.set(0, -L * 0.03, -L * 0.02);
+  const group = new THREE.Group();
+  group.add(skaterShadow, skater);
+  return group;
+}
+
+function placeLimb(m, a, b) {
+  m.position.addVectors(a, b).multiplyScalar(0.5);
+  m.quaternion.setFromUnitVectors(UP, _dir.subVectors(b, a).normalize());
+}
+
+// Knee (or elbow) of a 2-bone chain in the xy plane; bend = +1 bends toward +x.
+function ik2(root, tip, l1, l2, bend) {
+  const dx = tip.x - root.x, dy = tip.y - root.y;
+  const d = Math.max(Math.min(Math.hypot(dx, dy), (l1 + l2) * 0.999), Math.abs(l1 - l2) + 1e-3);
+  const a = Math.atan2(dy, dx) + bend * Math.acos(clamp((l1 * l1 + d * d - l2 * l2) / (2 * l1 * d), -1, 1));
+  return new THREE.Vector3(root.x + Math.cos(a) * l1, root.y + Math.sin(a) * l1, root.z);
+}
+
+// Arm hanging at `swing` rad from straight down (+ toward +x), elbow bent by `bend`.
+function armPoints(shoulder, swing, bend) {
+  const e = shoulder.clone().add(new THREE.Vector3(Math.sin(swing), -Math.cos(swing), 0).multiplyScalar(BONES.upperArm));
+  const h = e.clone().add(new THREE.Vector3(Math.sin(swing + bend), -Math.cos(swing + bend), 0).multiplyScalar(BONES.foreArm));
+  return [e, h];
+}
+
+function lookSkater(styleName) {
+  if (rig.style === styleName) return;
+  rig.style = styleName;
+  const look = SKATER_LOOKS[styleName] || SKATER_LOOKS.original;
+  rig.ink.color.copy(look.ink);
+  for (const m of rig.tinted) m.emissive.set(look.tint ?? 0x000000).multiplyScalar(look.tint ? 0.14 : 0);
+}
+
+// t: timeline time; ride: seconds since the board started rolling; slope: the
+// board's rotation.z; jump: 0..1 through a jump span, or -1 when on the ground;
+// styleName: the art style on screen; air: the board's height above the track (world units).
+function poseSkater(t, ride, slope, jump, styleName, air) {
+  lookSkater(styleName);
+  const L = board.userData.L;
+  skaterShadow.position.y = -L * 0.03 - air;
+  skaterShadow.scale.setScalar(1 / (1 + 1.5 * air / L));
+  // Stay closer to upright than the deck, leaning a little into the slope.
+  skater.rotation.z = -slope * 0.65;
+  let crouch = 0.22 + 0.07 * Math.sin(t * 2.6);
+  let lift = 0;
+  if (jump >= 0) {
+    // Load, pop, tuck over the flip, absorb the landing.
+    crouch = jump < 0.12 ? lerp(0.35, 0.95, jump / 0.12)
+      : jump < 0.3 ? lerp(0.95, 0.15, (jump - 0.12) / 0.18)
+      : jump < 0.8 ? lerp(0.15, 0.85, smooth((jump - 0.3) / 0.5))
+      : lerp(0.85, 0.4, (jump - 0.8) / 0.2);
+    lift = 0.22 * Math.sin(Math.PI * clamp((jump - 0.12) / 0.76, 0, 1));
+  }
+  const feet = [new THREE.Vector3(0.21, lift, 0), new THREE.Vector3(-0.21, lift, 0)];
+  // Two kick pushes as the board starts: the back foot steps off, sweeps back along the ground, steps on again.
+  const push = ride >= 0 && ride < 1.6 ? (ride % 0.8) / 0.8 : -1;
+  if (push >= 0) {
+    const s = smooth(push);
+    const down = Math.sin(Math.PI * s);
+    // The ground is ~0.2 L below the deck top (deck height plus wheels).
+    feet[1].set(lerp(0.02, -0.7, s), lerp(lift, -0.2, Math.min(1, 1.6 * down)), 0);
+    crouch = Math.max(crouch, 0.3 + 0.4 * down);
+  }
+  const lean = 0.14 + (push >= 0 ? 0.12 : 0) + 0.05 * Math.sin(t * 1.3);
+  const hip = new THREE.Vector3(-0.02 + 0.05 * lean, lift + 0.56 * (1 - 0.28 * crouch), 0);
+  const up = new THREE.Vector3(Math.sin(lean), Math.cos(lean), 0);
+  const neck = hip.clone().addScaledVector(up, BONES.torso);
+  placeLimb(rig.torso, hip.clone().addScaledVector(up, 0.075), neck.clone().addScaledVector(up, -0.075));
+  rig.head.position.copy(neck).addScaledVector(up, 0.12);
+  rig.head.rotation.z = -lean * 0.6 + 0.04 * Math.sin(t * 2.6 + 0.6);
+  rig.hood.position.copy(neck).add(new THREE.Vector3(-0.07, -0.03, -0.03));
+
+  feet.forEach((foot, i) => {
+    const bend = i === 0 ? 1 : -1;   // front knee forward, back knee back
+    const h = hip.clone().add(new THREE.Vector3(bend * 0.045, 0, 0));
+    const knee = ik2(h, foot, BONES.thigh, BONES.shin, bend);
+    placeLimb(rig.thighs[i], h, knee);
+    const ankle = knee.clone().add(_dir.subVectors(foot, knee).normalize().multiplyScalar(BONES.shin));
+    placeLimb(rig.shins[i], knee, ankle);
+    rig.shoes[i].position.set(ankle.x + bend * 0.025, ankle.y + 0.035, 0);
+  });
+
+  // Arms out for balance, swaying against each other.
+  const sway = 0.18 * Math.sin(t * 1.9);
+  const shoulder = neck.clone().addScaledVector(up, -0.05);
+  const reach = jump >= 0 ? 0.6 : 0;
+  [[0.95 + sway + reach, 0.55], [-0.85 + sway - reach, -0.5]].forEach(([swing, bend], i) => {
+    const s = shoulder.clone().add(new THREE.Vector3(i === 0 ? 0.04 : -0.04, 0, 0.02));
+    const [elbow, hand] = armPoints(s, swing, bend);
+    placeLimb(rig.upperArms[i], s, elbow);
+    const wrist = elbow.clone().add(_dir.subVectors(hand, elbow).multiplyScalar((BONES.foreArm - 0.04) / BONES.foreArm));
+    placeLimb(rig.foreArms[i], elbow, wrist);
+    rig.hands[i].position.copy(hand);
+  });
+}
+
 // ---------------------------------------------------------------- UI
 const fmtS = (x) => (x == null ? "" : `${Number(x).toFixed(1)}s`);
 function buildUI() {
+  // Styles are generated in parallel, so the step takes as long as the slowest one.
+  const styleTimes = STYLES.map((s) => s.seconds).filter((x) => x != null);
   const timeFor = { depth: DATA.timings.da3, concepts: DATA.timings.concepts, sam: DATA.timings.sam31,
+    style: styleTimes.length ? Math.max(...styleTimes) : null,
     design: DATA.attempts.reduce((s, a) => s + (a.seconds || 0), 0) || null };
   document.getElementById("pipeline").innerHTML = STAGES.map((s, i) => `
     <div class="step" data-step="${s.key}">
@@ -606,6 +943,27 @@ function buildUI() {
       <div class="time">${fmtS(timeFor[s.key])}</div>
       <div class="bar"></div>
     </div>`).join("");
+
+  if (BACKGROUND_FILL) document.getElementById("bg-legend").textContent = "Background · Muse Image fills what is hidden";
+
+  document.getElementById("hint").innerHTML = `space play · R restart · 1–${STAGES.length} jump to step${STYLES.length > 1 ? " · S next art style" : ""}<br>drag to orbit · C cinematic camera · H hide UI · M sound`;
+
+  if (STYLES.length > 1) {
+    const bar = document.getElementById("styles");
+    bar.hidden = false;
+    bar.innerHTML = `<div class="tag">Art<br>Muse Image</div>` + STYLES.map((s, i) => `
+      <button class="sty" data-style="${i}" style="--sc:${s.color}" title="${s.label}${i ? " · Muse Image restyle" : " · original photo"}">
+        <img src="${s.images.photo}" alt=""><span>${s.label}</span>
+      </button>`).join("");
+    bar.querySelectorAll(".sty").forEach((el) => el.addEventListener("click", () => pickStyle(Number(el.dataset.style))));
+    document.getElementById("styleList").innerHTML = STYLES.map((s, i) => {
+      const a = s.alignment;
+      const off = a && a.outline_offset;
+      const drift = !a ? "ref" : off ? `${off.median_px.toFixed(1)} px` : "–";
+      const tip = off ? `${Math.round(off.within_3px * 100)}% of ${off.points} outline samples within 3 px · edge F1 ${a.edge_f1.toFixed(2)}` : "";
+      return `<div class="srow" data-style="${i}" title="${tip}"><i style="background:${s.color}"></i><span>${s.label}${a && a.registered ? " · re-registered" : ""}</span><b>${drift}</b><b>${fmtS(s.seconds) || "–"}</b></div>`;
+    }).join("");
+  }
 
   document.getElementById("photoKv").innerHTML = `<span>file</span><span>${DATA.title}</span><span>aspect</span><span>${DATA.aspect.toFixed(2)}</span>`;
   document.getElementById("depthKv").innerHTML = `<span>model</span><span>Depth Anything 3 (small)</span><span>runs</span><span>local GPU</span><span>time</span><span>${fmtS(DATA.timings.da3) || "–"}</span>`;
@@ -647,18 +1005,26 @@ function captionFor(stage, t) {
     case "concepts": return ["Muse Spark reads the scene", `${nCon} things to look for, chosen for this photo`];
     case "sam": return ["SAM 3.1 finds every one of them", `${nObj} objects segmented from text prompts`];
     case "layers": return ["Depth-sorted into 2.5D layers", "foreground · gameplay · background"];
+    case "style": return ["Muse Image repaints it as game art", `${STYLES.length - 1} styles · same composition, so every layer still lines up`];
     case "design": {
       const v = designAttempts.map((a) => (a.errors.length ? `attempt ${a.attempt}: ${a.errors.length} violation${a.errors.length > 1 ? "s" : ""}` : `attempt ${a.attempt}: verified`)).join("  →  ");
       return ["Muse Spark picks the ground. The track follows its real edge.", v];
     }
-    default: return [level.mission, occluders.length
-      ? `rides behind ${occluders.map((o) => o.label).join(", ")} · ${level.generator}`
-      : `rides along the ground · ${level.generator}`];
+    default: {
+      const art = activeStyle > 0 ? ` · ${STYLES[activeStyle].label.toLowerCase()} art` : "";
+      return [level.mission, occluders.length
+        ? `rides behind ${occluders.map((o) => o.label).join(", ")} · ${level.generator}${art}`
+        : `rides along the ground · ${level.generator}${art}`];
+    }
   }
 }
 
-let lastCaption = "";
+let lastCaption = "", activeStyle = 0, shownStyle = -1;
 function updateUI(t) {
+  if (activeStyle !== shownStyle) {
+    document.querySelectorAll(".sty, .srow").forEach((el) => el.classList.toggle("on", Number(el.dataset.style) === activeStyle));
+    shownStyle = activeStyle;
+  }
   const stage = stageAt(t);
   for (const el of document.querySelectorAll(".step")) {
     const s = STAGE[el.dataset.step];
@@ -705,6 +1071,8 @@ const camKeys = () => {
     concepts: [new THREE.Vector3(-d * 0.42, d * 0.12, d * 0.88), new THREE.Vector3(0, 0, 0.4)],
     sam: [new THREE.Vector3(d * 0.22, d * 0.06, d * 0.97), new THREE.Vector3(0, 0, 0.3)],
     layers: [new THREE.Vector3(d * 0.8, d * 0.3, d * 0.82), new THREE.Vector3(0, 0, -0.4)],
+    // More frontal, so the restyle wipe reads across every layer at once.
+    style: [new THREE.Vector3(d * 0.42, d * 0.1, d * 0.95), new THREE.Vector3(0, 0, -0.2)],
     // Aim below center so paths near the bottom of the photo clear the caption.
     design: [new THREE.Vector3(d * 0.5, d * 0.06, d * 0.88), new THREE.Vector3(0, -H * 0.1, 0)],
     overview: [new THREE.Vector3(0, -H * 0.04, d), new THREE.Vector3(0, -H * 0.08, 0)],
@@ -725,6 +1093,8 @@ function applyState(t) {
   const K = camKeys();
   const S = STAGE;
   const explode = ramp(t, S.layers.t0 + 1.2, S.layers.t0 + 4.2) * (1 - 0.72 * ramp(t, S.ride.t0, S.ride.t0 + 2.2));
+
+  activeStyle = applyStyle(t);
 
   // Relief: depth rises in step 2, stays through segmentation, sinks when layers split.
   const u = relief.material.uniforms;
@@ -758,7 +1128,7 @@ function applyState(t) {
   }
   for (const [name, mesh] of Object.entries(layerMeshes)) {
     mesh.position.z = zOf[name] * (H / 6);
-    mesh.material.opacity = layerIn * (name === "foreground" ? 1 - 0.65 * behind : 1);
+    mesh.material.uniforms.uOpacity.value = layerIn * (name === "foreground" ? 1 - 0.65 * behind : 1);
     mesh.visible = layerIn > 0.001;
     const frame = layerFrames[name];
     frame.position.z = mesh.position.z;
@@ -825,11 +1195,17 @@ function applyState(t) {
     const behind = ridePoint(path, Math.max(bu - 0.004, pathU0), zPlay);
     board.position.copy(p);
     board.rotation.z = Math.atan2(ahead.y - behind.y, ahead.x - behind.x);
-    let flip = 0;
-    for (const [a, b] of jumps) if (bu > a && bu < b) flip = smooth((bu - a) / (b - a)) * Math.PI * 2;
+    let flip = 0, jump = -1;
+    for (const [a, b] of jumps) {
+      if (bu > a && bu < b) {
+        jump = (bu - a) / (b - a);
+        flip = smooth(jump) * Math.PI * 2;
+      }
+    }
     // Tilt the deck toward the camera; seen exactly side-on it is a sliver.
     boardInner.rotation.x = 0.9 + flip;
     board.scale.setScalar(ramp(t, r.t0 + 0.8, r.t0 + 1.4));
+    poseSkater(t, t - (r.t0 + 1.4), board.rotation.z, jump, STYLES[activeStyle].name, rideHeight(bu));
   }
   const onGrind = riding && grinds.some(([a, b]) => { const bu = rideU(t); return bu >= a && bu <= b; });
   trail.forEach((s, i) => {
@@ -856,8 +1232,9 @@ function applyState(t) {
   // Cinematic camera.
   if (!manualCamera) {
     const st = stageAt(t);
-    const prevKey = { photo: K.front, depth: K.front, concepts: K.relief, sam: K.concepts, layers: K.sam, design: K.layers, ride: K.design };
-    const thisKey = { photo: K.front, depth: K.relief, concepts: K.concepts, sam: K.sam, layers: K.layers, design: K.design, ride: K.design };
+    const beforeDesign = S.style ? K.style : K.layers;
+    const prevKey = { photo: K.front, depth: K.front, concepts: K.relief, sam: K.concepts, layers: K.sam, style: K.layers, design: beforeDesign, ride: K.design };
+    const thisKey = { photo: K.front, depth: K.relief, concepts: K.concepts, sam: K.sam, layers: K.layers, style: K.style, design: K.design, ride: K.design };
     blendCam(prevKey[st.key], thisKey[st.key], ramp(t, st.t0, st.t0 + 2.6));
     if (st.key === "ride" && path.length >= 2) {
       const bp = ridePoint(path, rideU(t), 0);
@@ -884,6 +1261,482 @@ function applyState(t) {
   }
 }
 
+// ---------------------------------------------------------------- sound
+// The soundtrack is synthesized from the timeline, so it needs no audio files
+// and follows each level's own timings. One OfflineAudioContext pass renders
+// the whole score; the page plays that buffer locked to `time`, and
+// render_showcase.py muxes the same samples into the MP4.
+const SR = 44100;
+const BAR = (4 * 60) / 96;
+const BEAT = BAR / 4;
+const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
+function prng(seed) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let x = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Buses: music (drums through a sweepable low-pass), sfx, and the board's
+// rolling sounds, muffled while the skater is behind a foreground object.
+function soundGraph(ac) {
+  const rnd = prng(7);
+  const noise = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const nd = noise.getChannelData(0);
+  for (let i = 0; i < nd.length; i++) nd[i] = rnd() * 2 - 1;
+  const ir = ac.createBuffer(2, Math.round(ac.sampleRate * 2.4), ac.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const d = ir.getChannelData(c);
+    for (let i = 0; i < d.length; i++) d[i] = (rnd() * 2 - 1) * Math.pow(1 - i / d.length, 3.2);
+  }
+  const master = new GainNode(ac, { gain: 0.9 });
+  master.connect(new DynamicsCompressorNode(ac, { threshold: -10, knee: 6, ratio: 12, attack: 0.003, release: 0.2 })).connect(ac.destination);
+  const verb = new ConvolverNode(ac, { buffer: ir });
+  verb.connect(new GainNode(ac, { gain: 0.3 })).connect(master);
+  const music = new GainNode(ac, { gain: 0.5 });
+  music.connect(master);
+  const drumFilter = new BiquadFilterNode(ac, { type: "lowpass", frequency: 16000, Q: 0.8 });
+  drumFilter.connect(music);
+  const sfx = new GainNode(ac, { gain: 0.8 });
+  sfx.connect(master);
+  const rollFilter = new BiquadFilterNode(ac, { type: "lowpass", frequency: 12000 });
+  const roll = new GainNode(ac, { gain: 1 });
+  rollFilter.connect(roll).connect(sfx);
+  return { ac, rnd, noise, master, verb, music, drums: drumFilter, sfx, roll: rollFilter, rollGain: roll };
+}
+
+const osc = (g, type, frequency, detune = 0) => new OscillatorNode(g.ac, { type, frequency, detune });
+const noiseSrc = (g) => new AudioBufferSourceNode(g.ac, { buffer: g.noise, loop: true });
+const filt = (g, type, frequency, Q = 0.7) => new BiquadFilterNode(g.ac, { type, frequency, Q });
+function glide(param, t, f0, f1, dur) {
+  param.setValueAtTime(f0, t);
+  param.exponentialRampToValueAtTime(f1, t + dur);
+}
+
+// One voice: src → filters → gain (linear attack, hold, exponential decay)
+// → pan (a number, or [from, to] for a sweep) → bus, plus a reverb send.
+// With g.queue set, the voice is wired up later (see renderScore).
+function voice(g, t, src, { filters = [], a = 0.004, hold = 0, d = 0.25, v = 1, pan = 0, bus = g.sfx, wet = 0 } = {}) {
+  const ac = g.ac;
+  const end = t + a + hold + d;
+  const amp = new GainNode(ac, { gain: 0 });
+  amp.gain.setValueAtTime(0, t);
+  amp.gain.linearRampToValueAtTime(v, t + a);
+  if (hold > 0) amp.gain.setValueAtTime(v, t + a + hold);
+  amp.gain.exponentialRampToValueAtTime(0.0001, end);
+  const nodes = [src, ...filters, amp];
+  if (pan) {
+    const sweep = Array.isArray(pan);
+    const p = new StereoPannerNode(ac, { pan: sweep ? pan[0] : pan });
+    if (sweep) { p.pan.setValueAtTime(pan[0], t); p.pan.linearRampToValueAtTime(pan[1], end); }
+    nodes.push(p);
+  }
+  const send = wet ? new GainNode(ac, { gain: wet }) : null;
+  const offset = g.rnd() * 1.5;
+  const wire = () => {
+    for (let i = 1; i < nodes.length; i++) nodes[i - 1].connect(nodes[i]);
+    nodes[nodes.length - 1].connect(bus);
+    if (send) nodes[nodes.length - 1].connect(send).connect(g.verb);
+    if (src instanceof AudioBufferSourceNode) src.start(t, offset); else src.start(t);
+    src.stop(end + 0.02);
+  };
+  if (!g.queue) return wire();
+  g.queue.push({ t, end, wire, nodes: send ? [...nodes, send] : nodes });
+}
+
+// ----- instruments
+function kick(g, t, v) {
+  const o = osc(g, "sine", 150);
+  glide(o.frequency, t, 150, 42, 0.14);
+  voice(g, t, o, { a: 0.002, d: 0.38, v, bus: g.drums });
+  voice(g, t, noiseSrc(g), { filters: [filt(g, "highpass", 3000)], a: 0.001, d: 0.012, v: v * 0.25, bus: g.drums });
+}
+function snare(g, t, v) {
+  voice(g, t, noiseSrc(g), { filters: [filt(g, "bandpass", 1900, 0.7)], a: 0.002, d: 0.2, v, bus: g.drums, wet: 0.25 });
+  const o = osc(g, "triangle", 210);
+  glide(o.frequency, t, 210, 160, 0.08);
+  voice(g, t, o, { a: 0.002, d: 0.09, v: v * 0.5, bus: g.drums });
+}
+function hat(g, t, v, open = false) {
+  voice(g, t, noiseSrc(g), { filters: [filt(g, "highpass", 7500)], a: 0.001, d: open ? 0.22 : 0.035, v, pan: 0.15, bus: g.drums });
+}
+function crash(g, t, v) {
+  voice(g, t, noiseSrc(g), { filters: [filt(g, "highpass", 4500)], a: 0.002, d: 1.8, v, bus: g.drums, wet: 0.5 });
+}
+function bassNote(g, t, m, dur, v) {
+  const f = mtof(m);
+  voice(g, t, osc(g, "sine", f), { a: 0.01, hold: dur * 0.6, d: dur * 0.5, v, bus: g.music });
+  voice(g, t, osc(g, "triangle", f * 2), { filters: [filt(g, "lowpass", 600)], a: 0.01, hold: dur * 0.3, d: dur * 0.4, v: v * 0.25, bus: g.music });
+}
+function padChord(g, t, notes, dur, cutoff, v) {
+  for (const m of notes) for (const det of [-8, 8]) {
+    voice(g, t, osc(g, "sawtooth", mtof(m), det), { filters: [filt(g, "lowpass", cutoff, 0.4)], a: 0.5, hold: Math.max(0, dur - 0.5), d: 0.9, v, bus: g.music, wet: 0.35 });
+  }
+}
+function keys(g, t, m, v, pan) {   // soft electric-piano pluck
+  const f = mtof(m);
+  voice(g, t, osc(g, "sine", f), { a: 0.003, d: 0.7, v, pan, bus: g.music, wet: 0.4 });
+  voice(g, t, osc(g, "sine", f * 3), { a: 0.002, d: 0.12, v: v * 0.25, pan, bus: g.music });
+}
+
+// ----- effects
+function bell(g, t, m, v, pan = 0, wet = 0.5) {
+  const f = mtof(m);
+  voice(g, t, osc(g, "sine", f), { a: 0.002, d: 1.2, v, pan, wet });
+  voice(g, t, osc(g, "sine", f * 2.76), { a: 0.001, d: 0.3, v: v * 0.3, pan, wet });
+}
+function blip(g, t, f, v, pan = 0, type = "sine") {
+  const o = osc(g, type, f);
+  glide(o.frequency, t, f, f * 1.5, 0.06);
+  voice(g, t, o, { a: 0.003, d: 0.14, v, pan, wet: 0.25 });
+}
+function click(g, t, f, v, d = 0.03, bus = g.sfx, pan = 0) {
+  voice(g, t, noiseSrc(g), { filters: [filt(g, "bandpass", f, 1.2)], a: 0.001, d, v, pan, bus });
+}
+function thud(g, t, f, v, d = 0.12, bus = g.sfx) {
+  const o = osc(g, "sine", f);
+  glide(o.frequency, t, f, f * 0.5, d);
+  voice(g, t, o, { a: 0.002, d, v, bus });
+}
+function whoosh(g, t, dur, f0, f1, v, pan = 0) {
+  const bp = filt(g, "bandpass", f0, 1.4);
+  glide(bp.frequency, t, f0, f1, dur);
+  voice(g, t, noiseSrc(g), { filters: [bp], a: dur * 0.6, d: dur * 0.4, v, pan, wet: 0.3 });
+}
+function boom(g, t, v) {
+  const o = osc(g, "sine", 70);
+  glide(o.frequency, t, 70, 32, 0.8);
+  voice(g, t, o, { a: 0.01, d: 1.4, v, wet: 0.2 });
+}
+function buzz(g, t, v) {   // a rejected attempt: two falling square tones
+  for (const [dt, f] of [[0, 196], [0.16, 147]]) {
+    voice(g, t + dt, osc(g, "square", f), { filters: [filt(g, "lowpass", 1400)], a: 0.004, hold: 0.07, d: 0.06, v });
+  }
+}
+function clank(g, t, v, bus = g.sfx) {   // metal: inharmonic partials
+  for (const [r, k, d] of [[1, 1, 0.5], [2.76, 0.5, 0.3], [5.4, 0.3, 0.15]]) {
+    voice(g, t, osc(g, "sine", 620 * r), { a: 0.001, d, v: v * k, bus, wet: 0.3 });
+  }
+}
+function styleSwoosh(g, t, j) {
+  whoosh(g, t, WIPE, 500, 7000, 0.22, [-0.7, 0.7]);
+  const root = 84 + [0, 2, 4, 7, 9][j % 5];
+  [0, 4, 7].forEach((n, i) => bell(g, t + WIPE - 0.12 + i * 0.07, root + n, 0.05, 0.6 - i * 0.3));
+}
+
+// ----- score
+const CHORDS = [   // Fmaj7 · Em7 · Dm7 · Cmaj9, a slow descending lo-fi loop
+  { bass: 41, notes: [53, 57, 60, 64] },
+  { bass: 40, notes: [52, 55, 59, 62] },
+  { bass: 38, notes: [50, 53, 57, 60] },
+  { bass: 36, notes: [48, 52, 55, 59, 62] },
+];
+// What plays in each step: pad cutoff, arp notes per beat, then the drum kit and bass.
+const ARRANGE = {
+  photo:    { pad: 600, arp: 0 },
+  depth:    { pad: 800, arp: 1 },
+  concepts: { pad: 1000, arp: 1, kick: 1, hats: 1 },
+  sam:      { pad: 1100, arp: 1, kick: 1, hats: 1, bass: 1 },
+  layers:   { pad: 1300, arp: 2, kick: 1, hats: 1, bass: 1, snare: 1 },
+  style:    { pad: 1500, arp: 2, kick: 1, hats: 1, bass: 1, snare: 1 },
+  design:   { pad: 900, arp: 0, kick: 1, hats: 1, bass: 1 },
+  ride:     { pad: 1800, arp: 2, kick: 1, hats: 1, bass: 1, snare: 1, open: 1 },
+};
+
+function scoreMusic(g) {
+  const S = STAGE;
+  // Bar lines are phased so a downbeat lands exactly where the ride starts.
+  const k0 = -Math.floor(S.ride.t0 / BAR);
+  const first = S.ride.t0 + k0 * BAR;
+  if (first > 0.3) padChord(g, 0, CHORDS[3].notes, first, ARRANGE.photo.pad, 0.028);
+  // The Track step muffles the drums; they open back up for the drop.
+  const f = g.drums.frequency;
+  if (S.design) {
+    f.setValueAtTime(16000, S.design.t0);
+    f.exponentialRampToValueAtTime(800, S.design.t0 + 1.5);
+    f.setValueAtTime(800, S.ride.t0 - 2.2);
+    f.exponentialRampToValueAtTime(5000, S.ride.t0 - 0.02);
+    f.setValueAtTime(16000, S.ride.t0);
+  }
+  for (let k = k0; S.ride.t0 + k * BAR < DURATION; k++) {
+    const tb = S.ride.t0 + k * BAR;
+    if (tb + BAR > S.ride.t1 + 0.01) {   // outro: one chord that rings out
+      padChord(g, tb, [53, 57, 60, 64, 67], DURATION - tb, 1400, 0.028);
+      bassNote(g, tb, 41, 1.6, 0.3);
+      kick(g, tb, 0.7);
+      break;
+    }
+    const ch = CHORDS[((k % 4) + 4) % 4];
+    const A = ARRANGE[stageAt(tb + 0.01).key];
+    padChord(g, tb, ch.notes, BAR, A.pad, 0.028);
+    if (k === 0) crash(g, tb, 0.35);
+    for (let i = 0; i < 4 * A.arp; i++) {
+      const n = ch.notes[[0, 2, 1, 3, 2, 4, 3, 1][i % 8] % ch.notes.length] + 12;
+      keys(g, tb + (i * BEAT) / A.arp, n, 0.05 * (0.85 + 0.3 * g.rnd()), i % 2 ? 0.3 : -0.3);
+    }
+    if (A.kick) {
+      kick(g, tb, 0.9);
+      kick(g, tb + 2 * BEAT, 0.8);
+      if (A.open) kick(g, tb + 2.5 * BEAT, 0.55);
+    }
+    if (A.snare) { snare(g, tb + BEAT, 0.5); snare(g, tb + 3 * BEAT, 0.5); }
+    if (A.hats) {
+      for (let i = 0; i < 8; i++) {
+        const swing = i % 2 ? BEAT * 0.08 : 0;
+        hat(g, tb + (i * BEAT) / 2 + swing, (i % 2 ? 0.07 : 0.11) * (0.85 + 0.3 * g.rnd()), A.open && i === 7);
+      }
+    }
+    if (A.bass) {
+      bassNote(g, tb, ch.bass, 1.4 * BEAT, 0.35);
+      bassNote(g, tb + 2.5 * BEAT, ch.bass, 0.4 * BEAT, 0.3);
+      bassNote(g, tb + 3 * BEAT, ch.bass + 12, 0.9 * BEAT, 0.28);
+    }
+  }
+  const m = g.master.gain;
+  m.setValueAtTime(0.9, DURATION - 1.6);
+  m.linearRampToValueAtTime(0, DURATION);
+}
+
+function scoreSfx(g) {
+  const S = STAGE;
+  // Photo: a camera shutter.
+  click(g, 0.35, 3800, 0.5, 0.02);
+  thud(g, 0.35, 140, 0.25, 0.05);
+  click(g, 0.43, 2600, 0.35, 0.025);
+
+  // Depth: the relief rises out of the photo.
+  whoosh(g, S.depth.t0 + 0.8, 2.8, 150, 1800, 0.35, [-0.3, 0.3]);
+  const rumble = osc(g, "sine", 45);
+  glide(rumble.frequency, S.depth.t0 + 0.8, 45, 75, 2.8);
+  voice(g, S.depth.t0 + 0.8, rumble, { a: 2.0, d: 1.5, v: 0.2 });
+
+  // Concepts: one note per chip as it appears, skateable ones brighter.
+  const pent = [77, 79, 81, 84, 86, 89, 91, 93, 96];
+  const chips = [...DATA.concepts.skateable.map(() => true), ...DATA.concepts.scenery.map(() => false)];
+  chips.forEach((skate, i) => {
+    const t = S.concepts.t0 + 0.6 + i * 0.28;
+    const pan = lerp(-0.4, 0.4, chips.length > 1 ? i / (chips.length - 1) : 0.5);
+    if (skate) blip(g, t, mtof(pent[i % pent.length]), 0.13, pan, "triangle");
+    else blip(g, t, mtof(pent[i % pent.length] - 12), 0.09, pan);
+  });
+
+  // SAM 3.1: a scan sweep as the masks appear, then a tick per object label.
+  whoosh(g, S.sam.t0 + 0.3, 1.2, 400, 5000, 0.18, [-0.6, 0.6]);
+  DATA.objects.slice(0, 30).forEach((o, i) => {
+    const t = S.sam.t0 + 1.0 + i * 0.1;
+    blip(g, t, mtof(84 + [0, 3, 5, 7, 10][i % 5] + (o.skateable ? 12 : 0)), o.skateable ? 0.07 : 0.045, (o.at[0] - 0.5) * 1.2);
+  });
+
+  // Layers: a low boom as they explode apart, one bell per layer label.
+  boom(g, S.layers.t0 + 1.2, 0.55);
+  whoosh(g, S.layers.t0 + 1.2, 3.0, 120, 1200, 0.28, [-0.5, 0.5]);
+  [65, 69, 72].forEach((m, i) => bell(g, S.layers.t0 + 2.4 + i * 0.09, m + 12, 0.06, (i - 1) * 0.5));
+
+  // Restyle: a swoosh that follows the left-to-right wipe, then a sparkle.
+  if (S.style) {
+    for (let j = 0; j + 1 < styleSeq.length; j++) {
+      if (styleSeq[j] !== styleSeq[j + 1]) styleSwoosh(g, S.style.t0 + 1.4 + j * STYLE_SLOT, j);
+    }
+  }
+
+  // Track: each rejected attempt draws, buzzes and fades; the verified one chimes and draws.
+  blip(g, S.design.t0 + 0.3, 520, 0.06);
+  const d0 = S.design.t0 + 1.2;
+  for (let i = 0; i < failedCount; i++) {
+    const a0 = d0 + i * ATTEMPT_SLOT;
+    const draw = osc(g, "sawtooth", 200);
+    glide(draw.frequency, a0 + 0.2, 200, 420, 1.0);
+    voice(g, a0 + 0.2, draw, { filters: [filt(g, "lowpass", 1100)], a: 0.1, hold: 0.8, d: 0.15, v: 0.035 });
+    buzz(g, a0 + 1.25, 0.1);
+    whoosh(g, a0 + ATTEMPT_SLOT - 0.55, 0.5, 2000, 300, 0.1);
+  }
+  const final0 = d0 + failedCount * ATTEMPT_SLOT;
+  [77, 81, 84, 89].forEach((m, i) => bell(g, final0 + 0.1 + i * 0.07, m, 0.1, (i - 1.5) * 0.3));
+  const laser = osc(g, "triangle", 260);
+  glide(laser.frequency, final0 + 0.2, 260, 780, 2.2);
+  voice(g, final0 + 0.2, laser, { a: 0.3, hold: 1.5, d: 0.4, v: 0.05, pan: [-0.6, 0.6], wet: 0.3 });
+  // A pop as each grind / jump label appears (the path draws with a smoothstep).
+  const uSpan = Math.max(pathU1 - pathU0, 1e-6);
+  for (const ft of features) {
+    const fr = clamp(((Math.min(ft.from[0], ft.to[0]) + Math.max(ft.from[0], ft.to[0])) / 2 - pathU0) / uSpan);
+    const t = Math.max(final0 + 0.4, final0 + 0.2 + 2.2 * (0.5 - Math.sin(Math.asin(1 - 2 * fr) / 3)));
+    if (ft.type === "grind") clank(g, t, 0.08); else blip(g, t, 660, 0.08, 0, "triangle");
+  }
+
+  // Riser into the drop.
+  whoosh(g, S.ride.t0 - 2.0, 2.0, 200, 6000, 0.22, [0.4, -0.4]);
+  scoreRide(g);
+  [65, 69, 72, 76, 79].forEach((m, i) => bell(g, S.ride.t1 - 2.6 + i * 0.12, m + 12, 0.06, (i - 2) * 0.25, 0.7));
+}
+
+function scoreRide(g) {
+  if (path.length < 2) return;
+  const r = STAGE.ride;
+  const t0 = r.t0 + 1.4, t1 = r.t0 + 10;
+  const tOf = (u) => t0 + (8.6 * (u - pathU0)) / Math.max(pathU1 - pathU0, 1e-6);
+  const spans = (list) => list.map(([a, b]) => [tOf(a), tOf(b)]).filter(([a, b]) => b - a > 0.02);
+  const air = spans(jumps), rails = spans(grinds);
+  const gaps = [...air, ...rails].sort((p, q) => p[0] - q[0]);
+  const inGap = (t) => gaps.some(([a, b]) => t > a - 0.03 && t < b + 0.03);
+
+  // Board drops onto the track.
+  thud(g, r.t0 + 1.25, 110, 0.5, 0.12, g.roll);
+  click(g, r.t0 + 1.25, 2000, 0.3, 0.03, g.roll);
+
+  // Rolling: low noise and wheel hum, cut in the air and on rails.
+  const amp = new GainNode(g.ac, { gain: 0 });
+  amp.connect(g.roll);
+  const ag = amp.gain;
+  ag.setValueAtTime(0, t0);
+  ag.linearRampToValueAtTime(1, t0 + 0.15);
+  for (const [a, b] of gaps) {
+    ag.setValueAtTime(1, a);
+    ag.linearRampToValueAtTime(0, a + 0.03);
+    ag.setValueAtTime(0, b);
+    ag.linearRampToValueAtTime(1, b + 0.05);
+  }
+  ag.setValueAtTime(1, t1 - 0.1);
+  ag.linearRampToValueAtTime(0, t1 + 0.3);
+  const rolling = { a: 0.01, hold: t1 - t0 + 0.3, d: 0.05, bus: amp };
+  voice(g, t0, noiseSrc(g), { ...rolling, filters: [filt(g, "lowpass", 650)], v: 0.32 });
+  voice(g, t0, osc(g, "sine", 72), { ...rolling, v: 0.05 });
+
+  // Wheels clack over cracks in the ground.
+  const rnd = prng(11);
+  for (let t = t0 + 0.3; t < t1 - 0.2; t += 0.38 + rnd() * 0.22) {
+    if (inGap(t)) continue;
+    click(g, t, 1500, 0.16, 0.025, g.roll);
+    thud(g, t + 0.01, 95, 0.12, 0.05, g.roll);
+  }
+  for (const [a, b] of air) {   // ollie pop, then the landing
+    click(g, a, 2600, 0.5, 0.04, g.roll);
+    thud(g, a, 130, 0.4, 0.08, g.roll);
+    thud(g, b, 80, 0.6, 0.15, g.roll);
+    click(g, b, 1800, 0.35, 0.04, g.roll);
+  }
+  for (const [a, b] of rails) {   // lock in, scrape along, pop out
+    clank(g, a, 0.2, g.roll);
+    voice(g, a, noiseSrc(g), { filters: [filt(g, "bandpass", 3000, 5)], a: 0.02, hold: b - a, d: 0.12, v: 0.5, bus: g.roll });
+    voice(g, a, noiseSrc(g), { filters: [filt(g, "bandpass", 5400, 9)], a: 0.02, hold: b - a, d: 0.1, v: 0.35, bus: g.roll });
+    voice(g, a, osc(g, "sawtooth", 95), { filters: [filt(g, "bandpass", 800, 2)], a: 0.02, hold: b - a, d: 0.1, v: 0.06, bus: g.roll });
+    click(g, b, 2200, 0.3, 0.04, g.roll);
+  }
+  // Tail drag to a stop at the end of the track.
+  const drag = filt(g, "bandpass", 1600, 2);
+  glide(drag.frequency, t1 - 0.05, 1600, 500, 0.5);
+  voice(g, t1 - 0.05, noiseSrc(g), { filters: [drag], a: 0.04, d: 0.5, v: 0.2, bus: g.roll });
+
+  // Behind a foreground object the board sounds muffled, as it looks faded.
+  const behind = occluders
+    .map((o) => [Math.max(t0, tOf(o.x_range[0])), Math.min(t1, tOf(o.x_range[1]))])
+    .filter(([a, b]) => b > a)
+    .sort((p, q) => p[0] - q[0])
+    .reduce((out, s) => {
+      const lastSpan = out[out.length - 1];
+      if (lastSpan && s[0] <= lastSpan[1]) lastSpan[1] = Math.max(lastSpan[1], s[1]); else out.push([...s]);
+      return out;
+    }, []);
+  for (const [a, b] of behind) {
+    g.roll.frequency.setTargetAtTime(900, a, 0.08);
+    g.roll.frequency.setTargetAtTime(12000, b, 0.12);
+    g.rollGain.gain.setTargetAtTime(0.6, a, 0.08);
+    g.rollGain.gain.setTargetAtTime(1, b, 0.12);
+  }
+}
+
+function renderScore() {
+  const ac = new OfflineAudioContext(2, Math.ceil((DURATION + 0.1) * SR), SR);
+  const g = soundGraph(ac);
+  g.queue = [];
+  scoreMusic(g);
+  scoreSfx(g);
+  // Chrome processes every connected node on every render quantum, played or
+  // not, so a graph holding the whole score renders several times slower than
+  // real time. Instead, pause every STEP: wire up the voices that start in the
+  // next STEP and disconnect the ones that have ended.
+  const STEP = 0.5;
+  const queue = g.queue.sort((p, q) => p.t - q.t);
+  let next = 0, wired = [];
+  const advance = (now) => {
+    wired = wired.filter((vc) => {
+      if (vc.end + 0.05 >= now) return true;
+      vc.nodes.forEach((n) => n.disconnect());
+      return false;
+    });
+    while (next < queue.length && queue[next].t < now + STEP) {
+      queue[next].wire();
+      wired.push(queue[next++]);
+    }
+  };
+  advance(0);
+  for (let t = STEP; t < DURATION; t += STEP) ac.suspend(t).then(() => { advance(t); ac.resume(); });
+  return ac.startRendering();
+}
+
+function wavBase64(buf) {
+  const n = buf.length, ch = buf.numberOfChannels, bytes = n * ch * 2;
+  const view = new DataView(new ArrayBuffer(44 + bytes));
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, "RIFF"); view.setUint32(4, 36 + bytes, true); str(8, "WAVEfmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, ch, true);
+  view.setUint32(24, buf.sampleRate, true); view.setUint32(28, buf.sampleRate * ch * 2, true);
+  view.setUint16(32, ch * 2, true); view.setUint16(34, 16, true);
+  str(36, "data"); view.setUint32(40, bytes, true);
+  const data = Array.from({ length: ch }, (_, c) => buf.getChannelData(c));
+  for (let i = 0, o = 44; i < n; i++) for (let c = 0; c < ch; c++, o += 2) view.setInt16(o, clamp(data[c][i], -1, 1) * 32767, true);
+  const u8 = new Uint8Array(view.buffer);
+  let bin = "";
+  for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// Live playback. Browsers start audio only after a click or key press.
+const sound = { ctx: null, fx: null, buffer: null, src: null, on: true, at: 0, offset: 0, lastTime: -1 };
+const soundLive = () => sound.on && sound.ctx !== null && sound.ctx.state === "running";
+function unlockSound() {
+  if (CAPTURE) return;
+  if (!sound.ctx) {
+    sound.ctx = new AudioContext();
+    sound.fx = soundGraph(sound.ctx);
+    sound.ctx.addEventListener("statechange", setSoundIcon);
+  }
+  if (sound.ctx.state !== "running") sound.ctx.resume();
+}
+function toggleSound() {
+  if (soundLive()) sound.on = false;
+  else { sound.on = true; unlockSound(); }
+  setSoundIcon();
+}
+function setSoundIcon() {
+  const el = document.getElementById("sound");
+  el.textContent = soundLive() ? "🔊" : "🔇";
+  el.title = soundLive() ? "Sound off (M)" : "Sound on (M)";
+}
+function stopSound() {
+  sound.src.stop();
+  sound.src.disconnect();
+  sound.src = null;
+}
+// While the soundtrack plays it is the clock. Any other change to `time`
+// (scrub, restart, jump to a step) restarts the buffer at the new position.
+function soundClock() {
+  const live = soundLive() && sound.buffer && playing && !scrubbing && time < DURATION;
+  if (sound.src && (!live || time !== sound.lastTime)) stopSound();
+  if (!live) return false;
+  if (!sound.src) {
+    sound.src = new AudioBufferSourceNode(sound.ctx, { buffer: sound.buffer });
+    sound.src.connect(sound.ctx.destination);
+    sound.at = sound.ctx.currentTime;
+    sound.offset = time;
+    sound.src.start(sound.at, time);
+  }
+  time = Math.min(DURATION, sound.offset + sound.ctx.currentTime - sound.at);
+  sound.lastTime = time;
+  return true;
+}
+
 // ---------------------------------------------------------------- loop
 let time = 0, playing = !CAPTURE, scrubbing = false, last = performance.now();
 function renderAt(t) {
@@ -900,9 +1753,9 @@ function tick(now) {
   const dt = Math.min(0.25, (now - last) / 1000);
   last = now;
   if (playing && !scrubbing) {
-    time += dt;
+    if (!soundClock()) time += dt;
     if (time >= DURATION) { time = DURATION; playing = false; setPlayIcon(); }
-  }
+  } else soundClock();
   renderAt(time);
   requestAnimationFrame(tick);
 }
@@ -923,11 +1776,16 @@ document.getElementById("play").onclick = () => { if (time >= DURATION) time = 0
 const scrub = document.getElementById("scrub");
 scrub.addEventListener("input", () => { scrubbing = true; time = (scrub.value / 1000) * DURATION; });
 scrub.addEventListener("change", () => { scrubbing = false; });
+document.getElementById("sound").onclick = toggleSound;
+window.addEventListener("pointerdown", unlockSound);
+window.addEventListener("keydown", unlockSound);
 window.addEventListener("keydown", (e) => {
   if (e.code === "Space") { e.preventDefault(); document.getElementById("play").click(); }
-  else if (e.key === "r" || e.key === "R") { time = 0; playing = true; manualCamera = false; setPlayIcon(); }
+  else if (e.key === "r" || e.key === "R") { time = 0; playing = true; manualCamera = false; userStyle = null; setPlayIcon(); }
+  else if ((e.key === "s" || e.key === "S") && STYLES.length > 1) pickStyle((activeStyle + 1) % STYLES.length);
   else if (e.key === "h" || e.key === "H") document.body.classList.toggle("hide-ui");
   else if (e.key === "c" || e.key === "C") manualCamera = false;
+  else if (e.key === "m" || e.key === "M") toggleSound();
   else if (e.key >= "1" && e.key <= String(STAGES.length)) { time = STAGES[Number(e.key) - 1].t0; manualCamera = false; }
 });
 
@@ -935,8 +1793,17 @@ window.addEventListener("keydown", (e) => {
 await build();
 buildUI();
 await document.fonts.ready;
-window.__showcase = { duration: DURATION, renderAt, stages: STAGES.map((s) => ({ key: s.key, t0: s.t0, t1: s.t1 })) };
-if (CAPTURE) renderAt(0); else requestAnimationFrame(tick);
+window.__showcase = {
+  duration: DURATION, renderAt, stages: STAGES.map((s) => ({ key: s.key, t0: s.t0, t1: s.t1 })),
+  audioWav: async () => wavBase64(await renderScore()),
+};
+if (CAPTURE) renderAt(0);
+else {
+  renderScore().then((b) => { sound.buffer = b; });
+  unlockSound();   // plays at once where autoplay is allowed
+  setSoundIcon();
+  requestAnimationFrame(tick);
+}
 window.__showcaseReady = true;
 </script>
 </body>

@@ -46,8 +46,15 @@ public class MobileCameraCapture : MonoBehaviour
     private string apiKey = "112550191";
 
     [Header("Polling Settings")]
-    public int maxPollingAttempts = 5;
-    public float pollingInterval = 1.0f;
+    public float pollingInterval = 3.0f;
+    [Tooltip("Give up after this many seconds. SAM 3.1 + Muse Spark + Muse Image usually take 40-90s; win-server waits up to 300s.")]
+    public float processingTimeoutSeconds = 320f;
+    [Tooltip("Typical generation time, only used to fill the loading bar.")]
+    public float expectedProcessingSeconds = 75f;
+
+    [Header("Art Style")]
+    [Tooltip("Optional. Built under the upload panel at runtime when left empty.")]
+    [SerializeField] private ArtStyleSelector artStyleSelector;
 
     [Header("UI References")]
     public TMP_InputField ipInputField;
@@ -104,9 +111,14 @@ public class MobileCameraCapture : MonoBehaviour
     private string UploadUrl => $"http://{GetSanitizedIP()}:{GetSanitizedPort()}/upload";
     private string DownloadUrl => $"http://{GetSanitizedIP()}:{GetSanitizedPort()}/download";
 
+    public bool IsProcessing => isProcessing;
+    public bool HasPendingLevel => pendingLevelPayload != null;
+    public ArtStyleSelector ArtStyleSelector => artStyleSelector;
+
     private void Start()
     {
         ResolveUIFlowController();
+        ResolveArtStyleSelector();
 
         currentServerIP = PlayerPrefs.GetString("SavedServerIP", defaultServerIP);
         currentServerIP = GetSanitizedIP();
@@ -260,6 +272,20 @@ public class MobileCameraCapture : MonoBehaviour
         if (uiFlowController == null)
         {
             uiFlowController = new GameObject("UIFlowController").AddComponent<UIFlowController>();
+        }
+    }
+
+    private void ResolveArtStyleSelector()
+    {
+        if (artStyleSelector != null)
+        {
+            return;
+        }
+
+        artStyleSelector = FindFirstObjectByType<ArtStyleSelector>(FindObjectsInactive.Include);
+        if (artStyleSelector == null && uiFlowController != null && uiFlowController.UploadPanel != null)
+        {
+            artStyleSelector = uiFlowController.UploadPanel.AddComponent<ArtStyleSelector>();
         }
     }
 
@@ -419,6 +445,19 @@ public class MobileCameraCapture : MonoBehaviour
         });
     }
 
+    /// <summary>
+    /// Upload image files that are already on disk (editor smoke test, debugging).
+    /// </summary>
+    public void ProcessFiles(IReadOnlyList<string> paths)
+    {
+        if (isProcessing || paths == null || paths.Count == 0)
+        {
+            return;
+        }
+
+        StartCoroutine(ProcessSelectedFiles(paths));
+    }
+
     private IEnumerator ProcessSelectedFiles(IReadOnlyList<string> paths)
     {
         if (paths == null || paths.Count == 0)
@@ -453,7 +492,10 @@ public class MobileCameraCapture : MonoBehaviour
             }
 
             current++;
+            ShowLoading($"Processing image {current}/{total}...", showProgress: true);
+            SetLoadingProgress((current - 1f) / total);
             yield return StartCoroutine(ProcessSingleSelectedFile(path, current, total));
+            SetLoadingProgress((float)current / total);
         }
 
         isProcessing = false;
@@ -545,8 +587,13 @@ public class MobileCameraCapture : MonoBehaviour
 
     private IEnumerator PostImageToServer(byte[] data, int index, int total)
     {
+        ShowLoading($"Uploading image {index}/{total}...", showProgress: true);
         WWWForm form = new WWWForm();
         form.AddBinaryData("photo", data, $"mobile_upload_{index:D2}.jpg", "image/jpeg");
+        if (artStyleSelector != null)
+        {
+            form.AddField("style", artStyleSelector.SelectedStyle);
+        }
 
         using (UnityWebRequest www = UnityWebRequest.Post(UploadUrl, form))
         {
@@ -587,11 +634,17 @@ public class MobileCameraCapture : MonoBehaviour
     {
         int attempts = 0;
         bool isDone = false;
+        float startTime = Time.realtimeSinceStartup;
+        float elapsed = 0f;
+        string styleLabel = artStyleSelector != null ? artStyleSelector.SelectedLabel : "Original";
+        ShowLoading($"Generating level {batchIndex}/{batchTotal} ({styleLabel})...", showProgress: true);
 
-        while (attempts < maxPollingAttempts && !isDone)
+        while (elapsed < processingTimeoutSeconds && !isDone)
         {
             attempts++;
-            Debug.Log($"[MobileCameraCapture] Poll {batchIndex}/{batchTotal}, attempt {attempts}/{maxPollingAttempts}: {DownloadUrl}");
+            SetLoadingMessage($"Generating level {batchIndex}/{batchTotal} ({styleLabel})... {Mathf.FloorToInt(elapsed)}s");
+            SetLoadingProgress(0.95f * Mathf.Clamp01(elapsed / Mathf.Max(1f, expectedProcessingSeconds)));
+            Debug.Log($"[MobileCameraCapture] Poll {batchIndex}/{batchTotal}, attempt {attempts} ({elapsed:F0}s): {DownloadUrl}");
 
             using (UnityWebRequest www = UnityWebRequest.Get(DownloadUrl))
             {
@@ -625,7 +678,7 @@ public class MobileCameraCapture : MonoBehaviour
                         else if (response.status == "success" || response.metadata != null)
                         {
                             PrepareServerResponse(response, batchIndex);
-                            ShowResultPanel(true, "Level generated successfully");
+                            ShowResultPanel(true, BuildSuccessMessage(response.metadata));
                             isDone = true;
                         }
                         else
@@ -639,18 +692,41 @@ public class MobileCameraCapture : MonoBehaviour
                 }
             }
 
-            if (!isDone && attempts < maxPollingAttempts)
+            elapsed = Time.realtimeSinceStartup - startTime;
+            if (!isDone && elapsed < processingTimeoutSeconds)
             {
-                yield return new WaitForSeconds(pollingInterval);
+                yield return new WaitForSecondsRealtime(pollingInterval);
+                elapsed = Time.realtimeSinceStartup - startTime;
             }
         }
 
         if (!isDone)
         {
-            Debug.LogError($"[MobileCameraCapture] Polling timed out after {maxPollingAttempts} attempts for image {batchIndex}/{batchTotal}.");
+            Debug.LogError($"[MobileCameraCapture] Polling timed out after {elapsed:F0}s ({attempts} attempts) for image {batchIndex}/{batchTotal}.");
             pendingLevelPayload = null;
-            ShowResultPanel(false, "Processing failed");
+            ShowResultPanel(false, "Processing timed out");
         }
+    }
+
+    private static string BuildSuccessMessage(TrackData metadata)
+    {
+        string message = "Level generated successfully";
+        if (metadata == null)
+        {
+            return message;
+        }
+
+        if (metadata.art_style != null && !string.IsNullOrEmpty(metadata.art_style.label))
+        {
+            message += $" - {metadata.art_style.label} style";
+        }
+
+        if (metadata.level != null && !string.IsNullOrEmpty(metadata.level.mission))
+        {
+            message += $"\nMission: {metadata.level.mission}";
+        }
+
+        return message;
     }
 
     private void PrepareServerResponse(ServerResponse response, int batchIndex)
@@ -734,5 +810,30 @@ public class MobileCameraCapture : MonoBehaviour
         }
 
         return null;
+    }
+
+    private void ShowLoading(string message, bool showProgress)
+    {
+        ResolveUIFlowController();
+        if (uiFlowController != null)
+        {
+            uiFlowController.ShowLoadingPanel(message, showProgress);
+        }
+    }
+
+    private void SetLoadingMessage(string message)
+    {
+        if (uiFlowController != null)
+        {
+            uiFlowController.SetLoadingMessage(message);
+        }
+    }
+
+    private void SetLoadingProgress(float progress)
+    {
+        if (uiFlowController != null)
+        {
+            uiFlowController.SetLoadingProgress(progress);
+        }
     }
 }

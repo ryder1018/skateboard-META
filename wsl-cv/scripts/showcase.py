@@ -2,8 +2,10 @@
 
 The page replays the whole photo -> level pipeline in a three.js scene:
 photo -> DA3 depth relief -> Muse Spark concepts -> SAM 3.1 objects ->
-depth-sorted 2.5D layers -> Muse Spark surface choice + track -> ride, passing
-behind the objects that stand in front of the track.
+depth-sorted 2.5D layers -> Muse Image restyles -> Muse Spark surface choice +
+track -> ride, passing behind the objects that stand in front of the track.
+Every Muse Image style in styles.json is embedded, and the page has a style
+switcher that swaps the photo, relief and all three layers.
 
 Usage:
     python scripts/showcase.py <image> <inference_dir> <send2unity_dir> [--out showcase.html]
@@ -132,6 +134,33 @@ def _mask_overlay(mask: np.ndarray, image_bgr: np.ndarray | None, tint: tuple[in
     return _data_url(rgba, ".webp", [cv2.IMWRITE_WEBP_QUALITY, 92])
 
 
+def _style_assets(send2unity_dir: str) -> list[dict[str, Any]]:
+    """Each Muse Image style from styles.json: its registered image and re-cut layers."""
+    manifest = _load_json(os.path.join(send2unity_dir, "styles.json")) or {}
+    styles = []
+    for entry in manifest.get("styles", []):
+        folder = os.path.join(send2unity_dir, entry["dir"])
+        styled = cv2.imread(os.path.join(folder, "styled.png"))
+        if styled is None:
+            continue
+        styles.append(
+            {
+                "name": entry["name"],
+                "label": entry["label"],
+                "color": entry["color"],
+                "seconds": entry.get("seconds"),
+                "alignment": entry.get("alignment", {}),
+                "images": {
+                    "photo": _jpeg(styled),
+                    "foreground": _layer_asset(os.path.join(folder, "merged_layer_01.png")),
+                    "gameplay": _layer_asset(os.path.join(folder, "merged_layer_02.png")),
+                    "background": _layer_asset(os.path.join(folder, "merged_layer_03.png")),
+                },
+            }
+        )
+    return styles
+
+
 def build_showcase(image_path: str, inference_dir: str, send2unity_dir: str, out_html: str) -> str:
     base = os.path.splitext(os.path.basename(image_path))[0]
     image_bgr = cv2.imread(image_path)
@@ -182,6 +211,8 @@ def build_showcase(image_path: str, inference_dir: str, send2unity_dir: str, out
         },
         "concepts": scene.get("concepts", {"skateable": [], "scenery": [], "source": "unknown"}),
         "timings": scene.get("timings", {}),
+        "styles": _style_assets(send2unity_dir),
+        "background": (_load_json(os.path.join(send2unity_dir, "background.json")) or {}).get("source", "inpaint"),
         "objects": anchors,
         "level": level,
         "attempts": [

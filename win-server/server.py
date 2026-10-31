@@ -44,15 +44,17 @@ def normalize_result_schema(result_json):
 def check_auth():
     return request.headers.get("X-API-KEY") == API_KEY
 
-def process_image_background(image_bytes, filename, content_type):
+def process_image_background(image_bytes, filename, content_type, style):
     global job_state
     try:
-        print(f"Background worker: Sending image to WSL API at {WSL_API_URL}")
+        print(f"Background worker: Sending image to WSL API at {WSL_API_URL} (style={style or 'photo'})")
         files = {
             'photo': (filename, image_bytes, content_type)
         }
+        # Muse Image art style picked in Unity; omitted = WSL's MUSE_IMAGE_STYLE default
+        data = {'style': style} if style is not None else None
         # Post to the WSL inference API
-        response = requests.post(WSL_API_URL, files=files, timeout=WSL_TIMEOUT)
+        response = requests.post(WSL_API_URL, files=files, data=data, timeout=WSL_TIMEOUT)
         
         if response.status_code == 200:
             result_json = response.json()
@@ -89,6 +91,7 @@ def upload():
     image_bytes = photo.read()
     filename = photo.filename or 'latest.jpg'
     content_type = photo.content_type or 'image/jpeg'
+    style = request.form.get('style')
     
     # Save a local copy for debugging purposes (optional, keeps old behavior)
     if not os.path.exists('captures'):
@@ -105,7 +108,7 @@ def upload():
     # Start background thread to forward request to WSL API
     worker = threading.Thread(
         target=process_image_background,
-        args=(image_bytes, filename, content_type)
+        args=(image_bytes, filename, content_type, style)
     )
     worker.daemon = True
     worker.start()

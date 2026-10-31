@@ -25,6 +25,31 @@ def _clip_and_smooth_y(y_values, height, sigma, top_margin_px=0.0):
         y_values = np.clip(y_values, y_min, height - 1)
     return y_values
 
+def track_color(rgb_img, track_points):
+    """Mean BGR color around the track points as "#rrggbb" (None without points)."""
+    img_h, img_w = rgb_img.shape[:2]
+    colors = []
+    
+    for pt in track_points:
+        px = int(np.clip(pt[0], 0.0, 1.0) * (img_w - 1))
+        py = int(np.clip(pt[1], 0.0, 1.0) * (img_h - 1))
+        
+        # 為了避免拿到太多雜訊，擷取軌道點周圍 5x5 的小區域計算平均色
+        y_start = max(0, py - 2)
+        y_end = min(img_h, py + 3)
+        x_start = max(0, px - 2)
+        x_end = min(img_w, px + 3)
+        
+        region = rgb_img[y_start:y_end, x_start:x_end]
+        if region.size > 0:
+            colors.append(np.mean(region, axis=(0,1)))
+    
+    if not colors:
+        return None
+    mean_bgr = np.mean(colors, axis=0) # [B, G, R]
+    b, g, r = int(mean_bgr[0]), int(mean_bgr[1]), int(mean_bgr[2])
+    return f"#{r:02x}{g:02x}{b:02x}"
+
 def extract_smooth_track(npy_path, output_json, rgb_image_path=None, smooth_sigma=30.0, epsilon=20.0, alpha=0.5, sample_interval=20.0, source_img_name="image.jpg", clip_smooth_sigma=1.5, clip_top_margin_px=50.0):
     """
     smooth_sigma: 高斯平滑強度 (值越大，原本鋸齒狀的地形會被撫得越平，小碎石都會消失)
@@ -125,28 +150,7 @@ def extract_smooth_track(npy_path, output_json, rgb_image_path=None, smooth_sigm
     if rgb_image_path and os.path.exists(rgb_image_path):
         rgb_img = cv2.imread(rgb_image_path) # BGR format
         if rgb_img is not None:
-            # 確保圖片大小跟 mask 是一致的
-            img_h, img_w = rgb_img.shape[:2]
-            colors = []
-            
-            for pt in track_points:
-                px = int(np.clip(pt[0], 0.0, 1.0) * (img_w - 1))
-                py = int(np.clip(pt[1], 0.0, 1.0) * (img_h - 1))
-                
-                # 為了避免拿到太多雜訊，擷取軌道點周圍 5x5 的小區域計算平均色
-                y_start = max(0, py - 2)
-                y_end = min(img_h, py + 3)
-                x_start = max(0, px - 2)
-                x_end = min(img_w, px + 3)
-                
-                region = rgb_img[y_start:y_end, x_start:x_end]
-                if region.size > 0:
-                    colors.append(np.mean(region, axis=(0,1)))
-            
-            if len(colors) > 0:
-                mean_bgr = np.mean(colors, axis=0) # [B, G, R]
-                b, g, r = int(mean_bgr[0]), int(mean_bgr[1]), int(mean_bgr[2])
-                track_color_hex = f"#{r:02x}{g:02x}{b:02x}"
+            track_color_hex = track_color(rgb_img, track_points) or track_color_hex
             
     # 組裝成符合 example.json 格式的字典
     json_data = {
